@@ -1,0 +1,38 @@
+name: Bug report
+description: Report a reproducible issue with sanitized evidence.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "Please avoid uploading private recordings, real-world personal paths, credentials, or commercial plugin binaries."
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use a minimal synthetic project if possible.
+      placeholder: "1. Start Slate Studio...\n2. Create...\n3. Press..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit SHA / build version
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, graphics stack and (if relevant) backend, device class, sample rate and buffer. Remove identifiers.
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics and workaround
+      description: Log excerpts, tests and screenshots with personal details removed.

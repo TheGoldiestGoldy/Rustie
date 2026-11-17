@@ -1,0 +1,10 @@
+[package]
+name = "daw-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Pure musical time, scale, project, and edit primitives for a native Rust DAW"
+
+[dependencies]
+serde.workspace = true

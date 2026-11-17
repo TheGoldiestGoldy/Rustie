@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose a user workflow, not just a screenshot or a button.
+title: "feature: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: user_story
+    attributes:
+      label: User problem and desired result
+      description: Explain the music-making workflow the feature unlocks.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Testable acceptance criteria
+      description: Include expected behavior, edge cases and disabled/error states.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Architecture / safety / asset constraints
+      description: Real-time audio, licensing, performance and project format implications.

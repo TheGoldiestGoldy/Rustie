@@ -1,0 +1,12 @@
+[package]
+name = "daw-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+daw-core.workspace = true
+daw-engine = { path = "../daw-engine" }
+eframe = { version = "0.33.3", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+serde_json = "1"
