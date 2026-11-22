@@ -1,9 +1,14 @@
 //! Precompiled DAG for track/return/master routing. Construct or edit ONLY off the audio thread.
 //! Every buffer, edge delay, and node is allocated before the processor starts.
 
+use crate::effects::EffectRack;
+use crate::instruments::Instrument;
+use crate::live_plugin::LiveMidiMessage;
+use crate::monitor::RecordingMonitor;
 use std::f32::consts::TAU;
 
-const MAX_NODES: usize = 64;
+// 48 arrangement/session clips plus MIDI monitor nodes, buses and master.
+const MAX_NODES: usize = 128;
 const MAX_VOICES: usize = 16;
 const MAX_DELAY_SAMPLES: usize = 262_144;
 
@@ -54,6 +59,19 @@ impl Voice {
 #[derive(Debug)]
 pub enum Source {
     Silence,
+    /// Input-to-output monitoring only while armed. The raw microphone path
+    /// never overwrites recorded WAV data and is disabled by default.
+    LiveInput {
+        monitor: std::sync::Arc<RecordingMonitor>,
+        cursor: u64,
+    },
+    /// Sample-aligned synthesized metronome; first beat of the bar is accented.
+    /// No samples, timers or allocations are required in the audio callback.
+    Metronome {
+        bpm: f64,
+        beats_per_bar: u8,
+        beat_denominator: u8,
+    },
     /// Lightweight built-in diagnostic generator; no disk or allocations on RT.
     Tone {
         frequency_hz: f32,
@@ -64,15 +82,71 @@ pub enum Source {
         frames: std::sync::Arc<[StereoFrame]>,
         start_frame: u64,
     },
+    /// Arrangement playback bounded by a clip's edited end position.
+    /// Non-destructive trim prevents audio from continuing past the visible clip.
+    TrimmedSamples {
+        frames: std::sync::Arc<[StereoFrame]>,
+        start_frame: u64,
+        end_frame: u64,
+        /// Non-destructive source start offset for split clips.
+        source_offset_frames: u64,
+        gain: f32,
+        fade_in_frames: u64,
+        fade_out_frames: u64,
+    },
+    /// Session-mode playback with zero allocation in the audio callback.
+    /// Short samples are silent for the remainder of a quantized loop.
+    LoopedSamples {
+        frames: std::sync::Arc<[StereoFrame]>,
+        start_frame: u64,
+        loop_frames: u64,
+        source_offset_frames: u64,
+        gain: f32,
+        fade_in_frames: u64,
+        fade_out_frames: u64,
+    },
     /// Fixed 16-voice sine synth for MIDI engine verification (not a plugin replacement).
     MidiSine {
         voices: Box<[MidiVoice; MAX_VOICES]>,
         next_voice: usize,
     },
+    /// Built-in SoundFont instrument engine (rustysynth). Owned exclusively by
+    /// the render thread; presets swap in through a lock-free ring inside the
+    /// instrument, never through a graph rebuild.
+    SoundFont {
+        instrument: Box<dyn Instrument>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct MidiVoice(Voice);
+
+/// All operations are scalar and realtime-safe. A linear envelope decays
+/// before each clip boundary, avoiding abrupt jumps when editing vocals.
+fn envelope_gain(
+    gain: f32,
+    cursor: u64,
+    duration: u64,
+    fade_in_frames: u64,
+    fade_out_frames: u64,
+) -> f32 {
+    let gain = if gain.is_finite() {
+        gain.clamp(0.0, 4.0)
+    } else {
+        0.0
+    };
+    let entry = if fade_in_frames == 0 {
+        1.0
+    } else {
+        (cursor as f32 / fade_in_frames as f32).clamp(0.0, 1.0)
+    };
+    let exit = if fade_out_frames == 0 {
+        1.0
+    } else {
+        (duration.saturating_sub(cursor) as f32 / fade_out_frames as f32).clamp(0.0, 1.0)
+    };
+    gain * entry.min(exit)
+}
 
 impl Source {
     pub fn midi_sine() -> Self {
@@ -85,6 +159,40 @@ impl Source {
     fn sample(&mut self, position: u64, sample_rate: u32) -> StereoFrame {
         match self {
             Self::Silence => StereoFrame::ZERO,
+            Self::LiveInput { monitor, cursor } => monitor.take(cursor),
+            Self::Metronome {
+                bpm,
+                beats_per_bar,
+                beat_denominator,
+            } => {
+                // BPM is measured in quarter notes; the time signature's
+                // denominator sets the spacing of the audible subdivisions.
+                // E.g. 6/8 at 120 BPM clicks every eighth (0.25 seconds),
+                // with the first of six notes accented.
+                let frames_per_beat = sample_rate as f64 * 60.0 / *bpm
+                    * (4.0 / f64::from((*beat_denominator).max(1)));
+                if !frames_per_beat.is_finite() || frames_per_beat < 1.0 {
+                    return StereoFrame::ZERO;
+                }
+                let beat = (position as f64 / frames_per_beat).floor() as u64;
+                let beat_start = (beat as f64 * frames_per_beat).round() as u64;
+                let local = position.saturating_sub(beat_start);
+                let duration = (sample_rate as f64 * 0.035) as u64;
+                if local >= duration {
+                    return StereoFrame::ZERO;
+                }
+                let accent = beat.is_multiple_of(u64::from((*beats_per_bar).max(1)));
+                let freq = if accent { 1600.0_f32 } else { 1050.0_f32 };
+                let decay = (-8.0 * local as f32 / duration.max(1) as f32).exp();
+                let click = (std::f32::consts::TAU * freq * local as f32 / sample_rate as f32)
+                    .sin()
+                    * decay
+                    * if accent { 0.18 } else { 0.11 };
+                StereoFrame {
+                    left: click,
+                    right: click,
+                }
+            }
             Self::Tone {
                 frequency_hz,
                 phase,
@@ -111,6 +219,65 @@ impl Source {
                     None => StereoFrame::ZERO,
                 }
             }
+            Self::TrimmedSamples {
+                frames,
+                start_frame,
+                end_frame,
+                source_offset_frames,
+                gain,
+                fade_in_frames,
+                fade_out_frames,
+            } => {
+                if position >= *end_frame {
+                    StereoFrame::ZERO
+                } else if let Some(relative) = position.checked_sub(*start_frame) {
+                    let factor = envelope_gain(
+                        *gain,
+                        relative,
+                        end_frame.saturating_sub(*start_frame),
+                        *fade_in_frames,
+                        *fade_out_frames,
+                    );
+                    relative
+                        .checked_add(*source_offset_frames)
+                        .and_then(|offset| usize::try_from(offset).ok())
+                        .and_then(|offset| frames.get(offset))
+                        .copied()
+                        .unwrap_or(StereoFrame::ZERO)
+                        .scaled(factor)
+                } else {
+                    StereoFrame::ZERO
+                }
+            }
+            Self::LoopedSamples {
+                frames,
+                start_frame,
+                loop_frames,
+                source_offset_frames,
+                gain,
+                fade_in_frames,
+                fade_out_frames,
+            } => match position.checked_sub(*start_frame) {
+                Some(offset) if *loop_frames > 0 => {
+                    let local = offset % *loop_frames;
+                    let factor = envelope_gain(
+                        *gain,
+                        local,
+                        (*loop_frames)
+                            .min((frames.len() as u64).saturating_sub(*source_offset_frames)),
+                        *fade_in_frames,
+                        *fade_out_frames,
+                    );
+                    local
+                        .checked_add(*source_offset_frames)
+                        .and_then(|offset| usize::try_from(offset).ok())
+                        .and_then(|offset| frames.get(offset))
+                        .copied()
+                        .unwrap_or(StereoFrame::ZERO)
+                        .scaled(factor)
+                }
+                _ => StereoFrame::ZERO,
+            },
             Self::MidiSine { voices, .. } => {
                 let mut amplitude = 0.0;
                 for voice in voices.iter_mut() {
@@ -127,10 +294,21 @@ impl Source {
                     right: amplitude,
                 }
             }
+            Self::SoundFont { instrument } => {
+                // One sample at a time; rustysynth internally buffers into its
+                // configured block size, so this does not allocate per frame.
+                let mut left = [0.0_f32; 1];
+                let mut right = [0.0_f32; 1];
+                instrument.render(&mut left, &mut right);
+                StereoFrame {
+                    left: left[0],
+                    right: right[0],
+                }
+            }
         }
     }
 
-    fn note_on(&mut self, note: u8, velocity: u8, sample_rate: u32) {
+    pub(crate) fn note_on(&mut self, note: u8, velocity: u8, sample_rate: u32) {
         if note > 127 || velocity == 0 {
             if velocity == 0 {
                 self.note_off(note);
@@ -152,9 +330,12 @@ impl Source {
             });
             *next_voice = (slot + 1) % MAX_VOICES;
         }
+        if let Self::SoundFont { instrument } = self {
+            instrument.note_on(note, velocity);
+        }
     }
 
-    fn note_off(&mut self, note: u8) {
+    pub(crate) fn note_off(&mut self, note: u8) {
         if let Self::MidiSine { voices, .. } = self {
             for voice in voices.iter_mut() {
                 if voice.0.note == note {
@@ -162,13 +343,37 @@ impl Source {
                 }
             }
         }
+        if let Self::SoundFont { instrument } = self {
+            instrument.note_off(note);
+        }
     }
 
-    fn all_notes_off(&mut self) {
+    pub(crate) fn all_notes_off(&mut self) {
         if let Self::MidiSine { voices, .. } = self {
             for voice in voices.iter_mut() {
                 voice.0.active = false;
             }
+        }
+        if let Self::SoundFont { instrument } = self {
+            instrument.all_notes_off();
+        }
+    }
+
+    pub(crate) fn pitch_bend(&mut self, value: u16) {
+        if let Self::SoundFont { instrument } = self {
+            instrument.pitch_bend(value);
+        }
+    }
+
+    pub(crate) fn control_change(&mut self, controller: u8, value: u8) {
+        if let Self::SoundFont { instrument } = self {
+            instrument.control_change(controller, value);
+        }
+    }
+
+    pub(crate) fn program_change(&mut self, program: u8) {
+        if let Self::SoundFont { instrument } = self {
+            instrument.program_change(program);
         }
     }
 }
@@ -189,6 +394,8 @@ pub struct NodeSpec {
     pub pan: f32,
     pub latency_samples: usize,
     pub source: Source,
+    pub effects: EffectRack,
+    pub session: Option<crate::session::SessionVoice>,
 }
 
 impl NodeSpec {
@@ -200,6 +407,8 @@ impl NodeSpec {
             pan: 0.0,
             latency_samples: 0,
             source,
+            effects: EffectRack::default(),
+            session: None,
         }
     }
     pub fn midi(id: u32) -> Self {
@@ -210,6 +419,8 @@ impl NodeSpec {
             pan: 0.0,
             latency_samples: 0,
             source: Source::midi_sine(),
+            effects: EffectRack::default(),
+            session: None,
         }
     }
     pub fn returns(id: u32) -> Self {
@@ -220,6 +431,8 @@ impl NodeSpec {
             pan: 0.0,
             latency_samples: 0,
             source: Source::Silence,
+            effects: EffectRack::default(),
+            session: None,
         }
     }
     pub fn master(id: u32) -> Self {
@@ -230,6 +443,8 @@ impl NodeSpec {
             pan: 0.0,
             latency_samples: 0,
             source: Source::Silence,
+            effects: EffectRack::default(),
+            session: None,
         }
     }
 }
@@ -317,6 +532,12 @@ pub struct AudioGraph {
 }
 
 impl AudioGraph {
+    pub(crate) fn queue_session(&mut self, launch: &crate::session::SessionLaunch, now: u64) {
+        for node in &mut self.nodes {
+            node.queue_session(launch, now);
+        }
+    }
+
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
@@ -370,28 +591,72 @@ impl AudioGraph {
     }
 
     pub fn note_on(&mut self, id: u32, note: u8, velocity: u8) {
-        if let Some(node) = self
-            .nodes
-            .iter_mut()
-            .find(|n| n.id == id && n.kind == NodeKind::MidiTrack)
-        {
-            node.source.note_on(note, velocity, self.sample_rate);
-        }
+        self.live_midi(id, 0, LiveMidiMessage::NoteOn(note, velocity));
     }
 
     pub fn note_off(&mut self, id: u32, note: u8) {
+        self.live_midi(id, 0, LiveMidiMessage::NoteOff(note));
+    }
+
+    /// Kill only this MIDI clip's voices when a Session slot switches.
+    pub fn all_notes_off(&mut self, id: u32) {
+        self.live_midi(id, 0, LiveMidiMessage::Panic);
+    }
+
+    pub fn live_midi(&mut self, id: u32, channel: u8, message: LiveMidiMessage) {
         if let Some(node) = self
             .nodes
             .iter_mut()
             .find(|n| n.id == id && n.kind == NodeKind::MidiTrack)
         {
-            node.source.note_off(note);
+            match message {
+                LiveMidiMessage::NoteOn(note, velocity) => {
+                    node.source.note_on(note, velocity, self.sample_rate);
+                }
+                LiveMidiMessage::NoteOff(note) => node.source.note_off(note),
+                LiveMidiMessage::Sustain(value) => node.source.control_change(64, value),
+                LiveMidiMessage::PitchBend(value) => node.source.pitch_bend(value),
+                LiveMidiMessage::ChannelPanic => node.source.control_change(64, 0),
+                LiveMidiMessage::Panic => node.source.all_notes_off(),
+            }
+            node.effects.live_midi(channel, message);
+        }
+    }
+
+    pub fn control_change(&mut self, id: u32, controller: u8, value: u8) {
+        if let Some(node) = self
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == id && n.kind == NodeKind::MidiTrack)
+        {
+            node.source.control_change(controller, value);
+        }
+    }
+
+    pub fn program_change(&mut self, id: u32, program: u8) {
+        if let Some(node) = self
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == id && n.kind == NodeKind::MidiTrack)
+        {
+            node.source.program_change(program);
+        }
+    }
+
+    /// Re-anchor a preloaded Session audio loop at a future launch boundary.
+    /// No graph rebuild or allocation is needed in the render callback.
+    pub fn set_loop_start(&mut self, id: u32, frame: u64) {
+        if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id)
+            && let Source::LoopedSamples { start_frame, .. } = &mut node.source
+        {
+            *start_frame = frame;
         }
     }
 
     pub fn reset(&mut self) {
         for node in &mut self.nodes {
             node.source.all_notes_off();
+            node.effects.reset();
         }
         for edge in &mut self.edges {
             edge.delay.clear();
@@ -401,12 +666,41 @@ impl AudioGraph {
     /// One frame of signal flow, no allocation, file IO, locks, or sleeping.
     /// The graph and all routes must remain structurally unchanged while rendering.
     pub fn render_frame(&mut self, project_frame: u64) -> StereoFrame {
+        self.render_frame_scoped(project_frame, true)
+    }
+
+    /// Audition live MIDI when transport is stopped. Route synths through
+    /// groups and master, but never play an audio clip or advance its clock.
+    pub fn render_midi_frame(&mut self, project_frame: u64) -> StereoFrame {
+        self.render_frame_scoped(project_frame, false)
+    }
+
+    fn render_frame_scoped(&mut self, project_frame: u64, with_audio: bool) -> StereoFrame {
         self.scratch.fill(StereoFrame::ZERO);
         for &index in &self.topological_order {
             let node = &mut self.nodes[index];
-            let source = node.source.sample(project_frame, self.sample_rate);
+            let gate = if let Some(session) = &mut node.session {
+                if with_audio {
+                    session.advance(
+                        project_frame,
+                        self.sample_rate,
+                        &mut node.source,
+                        &mut node.effects,
+                    )
+                } else {
+                    0.0
+                }
+            } else {
+                1.0
+            };
+            let source = if with_audio || node.kind == NodeKind::MidiTrack {
+                node.source.sample(project_frame, self.sample_rate)
+            } else {
+                StereoFrame::ZERO
+            };
             let mut result = self.scratch[index];
             result.add(source);
+            result = node.effects.process(result).scaled(gate);
             result.left *= node.gain * if node.pan > 0.0 { 1.0 - node.pan } else { 1.0 };
             result.right *= node.gain * if node.pan < 0.0 { 1.0 + node.pan } else { 1.0 };
             self.scratch[index] = result;
@@ -644,6 +938,118 @@ mod tests {
     }
 
     #[test]
+    fn looped_samples_repeat_at_boundary_without_padding_allocations() {
+        let frames: std::sync::Arc<[StereoFrame]> = vec![
+            StereoFrame {
+                left: 0.25,
+                right: -0.25,
+            },
+            StereoFrame {
+                left: 0.5,
+                right: -0.5,
+            },
+        ]
+        .into();
+        let mut source = Source::LoopedSamples {
+            frames,
+            start_frame: 4,
+            loop_frames: 3,
+            source_offset_frames: 0,
+            gain: 1.0,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
+        };
+        assert_eq!(source.sample(3, 48_000), StereoFrame::ZERO);
+        assert_eq!(source.sample(4, 48_000).left, 0.25);
+        assert_eq!(source.sample(5, 48_000).left, 0.5);
+        assert_eq!(source.sample(6, 48_000), StereoFrame::ZERO);
+        assert_eq!(source.sample(7, 48_000).left, 0.25);
+    }
+
+    #[test]
+    fn split_audio_source_offset_preserves_both_halves() {
+        let samples: std::sync::Arc<[StereoFrame]> = (0..20)
+            .map(|i| StereoFrame {
+                left: i as f32 / 20.0,
+                right: 0.0,
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let mut left = Source::TrimmedSamples {
+            frames: std::sync::Arc::clone(&samples),
+            start_frame: 10,
+            end_frame: 15,
+            source_offset_frames: 0,
+            gain: 1.0,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
+        };
+        let mut right = Source::TrimmedSamples {
+            frames: std::sync::Arc::clone(&samples),
+            start_frame: 15,
+            end_frame: 20,
+            source_offset_frames: 5,
+            gain: 1.0,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
+        };
+        assert_eq!(left.sample(14, 48_000).left, 0.2);
+        assert_eq!(left.sample(15, 48_000), StereoFrame::ZERO);
+        assert_eq!(right.sample(15, 48_000).left, 0.25);
+        assert_eq!(right.sample(19, 48_000).left, 0.45);
+        let mut looped = Source::LoopedSamples {
+            frames: samples,
+            start_frame: 15,
+            loop_frames: 5,
+            source_offset_frames: 5,
+            gain: 1.0,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
+        };
+        assert_eq!(looped.sample(15, 48_000).left, 0.25);
+        assert_eq!(looped.sample(20, 48_000).left, 0.25);
+    }
+
+    #[test]
+    fn clip_gain_and_fades_are_sample_accurate() {
+        let samples: std::sync::Arc<[StereoFrame]> = vec![
+            StereoFrame {
+                left: 1.0,
+                right: -1.0
+            };
+            30
+        ]
+        .into();
+        let mut src = Source::TrimmedSamples {
+            frames: std::sync::Arc::clone(&samples),
+            start_frame: 10,
+            end_frame: 20,
+            source_offset_frames: 0,
+            gain: 0.5,
+            fade_in_frames: 4,
+            fade_out_frames: 4,
+        };
+        assert_eq!(src.sample(9, 48_000), StereoFrame::ZERO);
+        assert_eq!(src.sample(10, 48_000), StereoFrame::ZERO);
+        assert_eq!(src.sample(12, 48_000).left, 0.25);
+        assert_eq!(src.sample(14, 48_000).left, 0.5);
+        assert_eq!(src.sample(18, 48_000).left, 0.25);
+        assert_eq!(src.sample(20, 48_000), StereoFrame::ZERO);
+        let mut looped = Source::LoopedSamples {
+            frames: samples,
+            start_frame: 0,
+            loop_frames: 10,
+            source_offset_frames: 0,
+            gain: 0.5,
+            fade_in_frames: 4,
+            fade_out_frames: 4,
+        };
+        assert_eq!(looped.sample(0, 48_000), StereoFrame::ZERO);
+        assert_eq!(looped.sample(4, 48_000).left, 0.5);
+        assert_eq!(looped.sample(10, 48_000), StereoFrame::ZERO);
+    }
+
+    #[test]
     fn plugin_latency_compensates_parallel_track_paths() {
         let mut b = GraphBuilder::new(48_000);
         let mut slow = NodeSpec::audio(1, Source::Silence);
@@ -699,5 +1105,211 @@ mod tests {
         assert!(g.render_frame(1).left > 0.0);
         g.note_off(1, 69);
         assert_eq!(g.render_frame(2), StereoFrame::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod metronome_tests {
+    use super::*;
+
+    #[test]
+    fn metronome_respects_eighth_note_denominator_and_six_beat_bar() {
+        let mut click = Source::Metronome {
+            bpm: 120.0,
+            beats_per_bar: 6,
+            beat_denominator: 8,
+        };
+        let peak = |source: &mut Source, at: u64| {
+            (at + 1..at + 200)
+                .map(|frame| source.sample(frame, 48_000).left.abs())
+                .fold(0.0_f32, f32::max)
+        };
+        let first = peak(&mut click, 0);
+        let second = peak(&mut click, 12_000);
+        let next_bar = peak(&mut click, 72_000);
+        assert!(first > second * 1.5, "bar downbeat has stronger accent");
+        assert!(
+            (first - next_bar).abs() < 1e-5,
+            "accent repeats after six eighths"
+        );
+        assert_eq!(click.sample(6_000, 48_000), StereoFrame::ZERO);
+        assert!(second > 0.005, "second eighth clicks at frame 12k");
+    }
+
+    #[test]
+    fn click_is_accented_on_bar_one_and_silent_between_beats() {
+        let mut b = GraphBuilder::new(48_000);
+        b.add_node(NodeSpec::audio(
+            10,
+            Source::Metronome {
+                bpm: 120.0,
+                beats_per_bar: 4,
+                beat_denominator: 4,
+            },
+        ));
+        b.add_node(NodeSpec::master(20));
+        b.route(10, 20, 1.0);
+        let mut graph = b.build().unwrap();
+        let first = (1..150)
+            .map(|frame| graph.render_frame(frame).left.abs())
+            .fold(0f32, f32::max);
+        let between = (6000..7000)
+            .map(|frame| graph.render_frame(frame).left.abs())
+            .fold(0f32, f32::max);
+        let second = (24_001..24_150)
+            .map(|frame| graph.render_frame(frame).left.abs())
+            .fold(0f32, f32::max);
+        assert!(first > second * 1.5, "first beat should be accented");
+        assert_eq!(between, 0.0);
+        assert!(second > 0.01);
+        assert_eq!(
+            graph.render_midi_frame(48_003),
+            StereoFrame::ZERO,
+            "click must not sound while the transport is stopped"
+        );
+    }
+}
+
+#[cfg(test)]
+mod live_input_graph_regressions {
+    use super::*;
+    use crate::monitor::RecordingMonitor;
+    use std::sync::Arc;
+
+    #[test]
+    fn capture_samples_route_to_master_and_do_not_replay_after_empty() {
+        let monitor = Arc::new(RecordingMonitor::new());
+        monitor.write(StereoFrame {
+            left: 0.25,
+            right: -0.125,
+        });
+        monitor.write(StereoFrame {
+            left: 0.35,
+            right: -0.225,
+        });
+        let mut builder = GraphBuilder::new(44_100);
+        builder
+            .add_node(NodeSpec::audio(5, Source::LiveInput { monitor, cursor: 0 }))
+            .add_node(NodeSpec::master(10));
+        builder.route(5, 10, 1.0);
+        let mut graph = builder.build().unwrap();
+        assert_eq!(
+            graph.render_frame(0),
+            StereoFrame {
+                left: 0.25,
+                right: -0.125
+            }
+        );
+        assert_eq!(
+            graph.render_frame(1),
+            StereoFrame {
+                left: 0.35,
+                right: -0.225
+            }
+        );
+        assert_eq!(graph.render_frame(2), StereoFrame::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod live_midi_graph_routing_tests {
+    use super::*;
+    use crate::live_plugin::{LIVE_BLOCK, live_plugin_pair};
+
+    #[test]
+    fn midi_graph_forwards_note_events_to_isolated_instrument_exactly() {
+        let (instrument, mut worker) = live_plugin_pair();
+        let mut node = NodeSpec::midi(7);
+        node.source = Source::Silence;
+        node.effects.add_live(instrument);
+        node.latency_samples = crate::live_plugin::LIVE_DELAY;
+        let mut builder = GraphBuilder::new(44_100);
+        builder.add_node(node).add_node(NodeSpec::master(99));
+        builder.route(7, 99, 1.0);
+        let mut graph = builder.build().unwrap();
+
+        graph.note_on(7, 60, 100);
+        for frame in 0..LIVE_BLOCK as u64 {
+            graph.render_frame(frame);
+        }
+        let first = worker.recv().unwrap();
+        assert_eq!(first.midi_count, 1);
+        assert_eq!(first.midi[0].kind, 1);
+        assert_eq!(first.midi[0].note, 60);
+        assert_eq!(first.midi[0].offset, 0);
+
+        graph.note_off(7, 60);
+        for frame in LIVE_BLOCK as u64..(LIVE_BLOCK * 2) as u64 {
+            graph.render_frame(frame);
+        }
+        let second = worker.recv().unwrap();
+        assert_eq!(second.midi_count, 1);
+        assert_eq!(second.midi[0].kind, 0);
+        assert_eq!(second.midi[0].note, 60);
+        assert_eq!(second.midi[0].offset, 0);
+
+        graph.all_notes_off(7);
+        for frame in (LIVE_BLOCK * 2) as u64..(LIVE_BLOCK * 3) as u64 {
+            graph.render_frame(frame);
+        }
+        let third = worker.recv().unwrap();
+        assert_eq!(third.midi_count, 1);
+        assert_eq!(third.midi[0].kind, 2);
+    }
+}
+
+#[cfg(test)]
+mod soundfont_graph_routing_tests {
+    use super::*;
+
+    #[derive(Debug, Default)]
+    struct RecordingInstrument {
+        pub level: f32,
+    }
+
+    impl Instrument for RecordingInstrument {
+        fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
+            for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+                *l = self.level;
+                *r = self.level;
+            }
+        }
+        fn note_on(&mut self, _note: u8, _velocity: u8) {
+            self.level = 0.4;
+        }
+        fn note_off(&mut self, _note: u8) {
+            self.level = 0.0;
+        }
+        fn pitch_bend(&mut self, _value: u16) {}
+        fn control_change(&mut self, _controller: u8, _value: u8) {}
+        fn program_change(&mut self, _program: u8) {}
+        fn all_notes_off(&mut self) {
+            self.level = 0.0;
+        }
+        fn reset(&mut self) {
+            self.level = 0.0;
+        }
+    }
+
+    #[test]
+    fn sound_font_node_receives_midi_and_routes_audio_to_master() {
+        let mut builder = GraphBuilder::new(48_000);
+        let mut node = NodeSpec::midi(7);
+        node.source = Source::SoundFont {
+            instrument: Box::new(RecordingInstrument::default()),
+        };
+        builder.add_node(node).add_node(NodeSpec::master(99));
+        builder.route(7, 99, 1.0);
+        let mut graph = builder.build().unwrap();
+
+        // note_on sets the mock instrument's output level to 0.4, which must
+        // travel through the DAG to the master output.
+        graph.note_on(7, 60, 100);
+        assert_eq!(graph.render_frame(0).left, 0.4);
+        graph.note_off(7, 60);
+        assert_eq!(graph.render_frame(1), StereoFrame::ZERO);
+        graph.note_on(7, 64, 127);
+        graph.all_notes_off(7);
+        assert_eq!(graph.render_frame(2), StereoFrame::ZERO);
     }
 }

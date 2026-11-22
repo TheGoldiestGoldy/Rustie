@@ -4,3 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+vst3-host = { version = "0.11.1", default-features = false }
+serde = { workspace = true }
+serde_json = "1"
+hound = "3.5.1"
+daw-engine = { path = "../daw-engine" }
+vst = { version = "0.4.0", features = ["disable_deprecation_warning"] }
+clack-host = "0.2.0"
+clap-sys = "0.5.0"

@@ -1,6 +1,6 @@
 # Third-party dependency and attribution register
 
-Rustie / Slate Studio uses Rust dependencies declared in Cargo manifests and pinned by `Cargo.lock`. This is a **starting register**, not a completed release license audit.
+Rustie / Rusty uses Rust dependencies declared in Cargo manifests and pinned by `Cargo.lock`. This is a **starting register**, not a completed release license audit.
 
 | Direct dependency | Role | Defined in |
 | --- | --- | --- |
@@ -16,3 +16,5 @@ Rustie / Slate Studio uses Rust dependencies declared in Cargo manifests and pin
 At release time, generate a complete inventory of transitive dependencies and license texts based on `Cargo.lock`. Validate all external icons, fonts, audio and any code snippets used by future agents. **Do not ship installed commercial plugins, copyrighted sample packs, or proprietary assets.**
 
 No copied Ableton assets were found in the committed code snapshot reviewed for this publication.
+
+Updated resolved metadata: [locked dependency inventory](docs/DEPENDENCIES.md). The current graph additionally includes MIDI, SoundFont and CLAP/VST3/VST2 host dependencies. No third-party plug-in or production SoundFont bank is distributed.

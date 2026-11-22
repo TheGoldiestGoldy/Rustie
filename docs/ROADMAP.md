@@ -1,63 +1,24 @@
-# Roadmap and definition of done
+# Roadmap: evidence before release dates
 
-Priorities reflect the product goal and the present codebase, **not promised dates**. Each item is complete only with passing tests and hands-on workflows.
+The roadmap has acceptance gates, not a promised v1 date. Rusty does not need complete commercial-DAW feature parity to be useful, but it does need a dependable recording-to-export workflow.
 
-## P0: stabilize usable music-making loop
+| Stage | Outcome | Remaining acceptance |
+|---|---|---|
+| Beta 1 — make and save a song | Core recording, MIDI/audio editing, Session, effects, save/reopen and export work together | Resolve startup failures; complete physical input/output, listening and alignment; confirm supported live-insert print workflow; finish packaging and notices |
+| Beta 2 — make it dependable | Repeatable creator workflows across supported environments | Device/rate recovery, measured latency and underruns, long audio streaming, long Session/plugin runs, clean install/upgrade and at least two Linux hardware/distro combinations |
+| v1 — usable production release | A documented, supportable workflow for real music projects | Automation, practical warp/time stretch, sends/returns and usable PDC, MIDI/stem interchange, migrations/recovery, versioned packages and compatibility evidence |
+| Research alongside the DAW | Determine whether Autonatural earns an integrated role | Real-vocal listening and quality gates, reversible workflow testing and measured time-to-result |
 
-- [ ] Eliminate/measure audible onset lag relative to UI playhead: capture callback timestamps, device predicted delay, actual loopback timing where possible. A 128-frame buffer setting alone is not evidence.
-- [ ] Verify an eight-note demo plays all eight notes at the expected times on user hardware. Test cold start, repeat play/stop, seek and backend switching.
-- [ ] Merge and validate searchable, resizable left browser (samples/instruments/FX/plugins/places); keep unloaded plugins disabled.
-- [ ] Make the piano roll actually easy to edit: add/delete, move, resize, select, zoom, velocity, 1/4..1/32 grid, scale root/mode/highlight/fold.
-- [ ] Keep Arrangement clip selection and dragging separate from seek ruler; verify mixer controls.
-- [ ] Save/reopen a multi-track JSON project without silently dropping edits or mixer state.
-- [ ] CI: fmt, Clippy, tests; zero exposed personal data or binary assets.
-- [ ] Fix hard-coded absolute path in launcher; document supported Linux libraries.
+## Immediate priorities
 
-**Exit:** A musician can launch, make a two-track MIDI/audio sketch, edit it, hear it promptly, save, close, reopen and continue with no unexplained loss.
+1. Finish the mic/seek acceptance record, then verify their combined source and matched desktop build.
+2. Reproduce and resolve delayed or stalled output startup, keeping callback timing separate from physical latency.
+3. Complete a real interface session: record, listen, edit, save, cold reopen and export, with reference-transient alignment.
+4. Define a verified way to print supported live inserts; keep export limitations visible until it exists.
+5. Finish distribution notices, contributor-rights confirmation and repeatable packaging.
 
-## P1: actual Session workflow
+## v1 release test
 
-- [ ] Shared track / device / clip model between Arrangement and Session.
-- [ ] Per-slot play/stop control, scene play, active/queued indicators.
-- [ ] Quantization: immediate, 1/4, 1 bar, 2 bars (specify clock semantics and tests).
-- [ ] Session vs Arrangement arbitration rules, with visible takeover indicator.
-- [ ] Global loop region and transport loop controls.
-- [ ] Clip duplication, copy/paste, undo/redo integrated into main editor.
-- [ ] Better controller/focus, keyboard shortcuts and right-click menus.
+Produce, record, edit, mix, reopen and export a real project longer than ten minutes with supported hardware and plug-ins, without data loss. Publish measured latency and deadline/underrun results, verify old-project migration and missing-device recovery, exercise plug-in faults, and reproduce installation and regression checks.
 
-**Exit:** Session clips can start/stop musically in time, scenes act predictably and existing Arrangement playback is not corrupted.
-
-## P2: recording and sound quality
-
-- [ ] Microphone/interface input via native driver; record-arm, monitoring, metronome and overdub rules.
-- [ ] MIDI keyboard input and basic clock/device management.
-- [ ] True latency and xrun measurement; settings UI with device/buffer/sample-rate report.
-- [ ] Streaming long samples from disk, higher-quality resampling, file relink and portable project packaging.
-- [ ] Automation lanes, editable envelopes and gain smoothing, plugin-ready graph lifetime.
-- [ ] Common editing tools: trim/fade, waveform zoom, loop, split, multi-select, groups, meters, export WAV.
-
-## P3: plugin hosting and isolation
-
-- [ ] CLAP research/proof of concept with isolated worker, explicit shared-memory IPC protocol.
-- [ ] Worker crash recovery and host fallback with bounded audio impact.
-- [ ] Plugin catalog with plugin name/vendor/format and user-controlled scanning; versioned cache.
-- [ ] Plug-in parameter automation, preset/state persistence, reported latency, sidechain and bypass.
-- [ ] VST3 hosting only after reviewing SDK/license obligations; LV2 assessment separately.
-- [ ] Do not bundle or distribute commercial plugin executables.
-
-## P4: interchange and polish
-
-- [ ] Native versioned project format with migration tests and media packaging.
-- [ ] Read-only subset of Ableton `.als` format behind clear compatibility disclaimers, corpus of legally obtained files.
-- [ ] Evaluate safe round-trip preservation for supported XML parts, never imply lossless conversion.
-- [ ] Glass-like UI polish with GPU/CPU profiling, scalable HiDPI layout and accessibility.
-- [ ] Additional Linux distributions, platform packaging, reproducible release flow.
-
-## Non-goals for MVP
-
-- A cloned Ableton interface or imported proprietary assets.
-- Claims of commercial compatibility without independently tested artifacts.
-- Disabling audio safety/quality tests to meet a speed target.
-- Production VST host, cross-platform parity or third-party plugin distribution in the first release.
-
-Project management rule: link milestone checkboxes to actual PRs/tests, not verbal agent assurances.
+The detailed engineering plan remains in [Beta 1 roadmap](beta-plan/00-ROADMAP.md) and [post-Beta path to v1](beta-plan/09-POST-BETA-TO-V1.md). Some planned items now have implementations; the acceptance gates, not unchecked historical lists, determine release status. Autonatural remains a separate research alpha outside the documented v1 gate.

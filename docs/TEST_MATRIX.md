@@ -41,7 +41,7 @@ Audio interface / selected backend:
 Actual sink and device routing:
 Sample rate / requested quantum / measured quantum:
 Project tracks / clips / events / media source duration:
-Cold vs warm: 
+Cold vs warm:
 Start press -> first nonzero generated sample:
 Start press -> first physical output (measured method):
 GUI transport -> audible skew:

@@ -1,59 +1,46 @@
-# Architecture, implementation status and verification
+# Architecture
 
-## Phase 1: core musical domain (implemented)
+This overview describes the integrated development design. Revision-specific behavior and measurements live in the [verification ledger](VERIFICATION.md) and dated reports.
 
-- Pure `daw-core` with integer 960 PPQ and tempo map integration to device frames using checked i128 arithmetic.
-- Root C..B, 12 scale modes, chromatic vs scale membership and bijective fold-index/pitch mapping over MIDI 0..127.
-- Track/clip/note models; bounded Command-pattern Undo/Redo on the UI thread.
-- Tests for tempo boundaries, sample rates, fraction BPM, all 12 roots × 12 scales, and edit history.
+```mermaid
+flowchart LR
+    UI[Native egui UI] --> Model[Project model and history]
+    Model --> Compile[Off-thread graph preparation]
+    Compile --> Engine[Audio render engine]
+    UI --> Queue[Bounded control and launch queues]
+    Queue --> Engine
+    Input[Physical input] --> Capture[Bounded capture and monitor paths]
+    Capture --> Writer[Off-callback WAV writer]
+    Capture --> Meter[Input meter and waveform preview]
+    Engine <--> Bridge[Bounded plug-in bridge]
+    Bridge <--> Worker[Separate CLAP / VST3 worker]
+    Engine --> Driver[CPAL native output]
+```
 
-## Phase 2: audio engine (functional initial implementation)
+## Domain and persistence
 
-Code:
-- `graph.rs`: topologically sorted DAG with audio/MIDI tracks, sends, returns, master, nodes identified by ID. Graph and edge delay lines preallocated off-thread. Up to 64 nodes, maximum declared per-node/path latency of 262144 frames.
-- `engine.rs`: lock-free rtrb SPSC control queue, fixed-size sorted command staging, sample-accurate events on a monotonic engine clock, play/stop/seek, node gain/pan/send changes, 64 concurrent linear gain ramps, fixed MIDI voices, sanitized stereo/mono outputs. Queue overflow reported via atomic telemetry. Audio thread owns the graph.
-- `driver.rs`: CPAL v0.18 with native PulseAudio, JACK and ALSA output selection and fallback for supported-device discovery, f32 stereo preference, 44100/48000/96000 Hz config validation, requested 64–2048 buffer frames (JACK controls own quantum), live stream callback, atomically published kernel callback TID.
-- `realtime.rs`: control-thread real-time priority negotiation: use existing SCHED_FIFO scheduling where available, otherwise Linux direct scheduling via RLIMIT_RTPRIO, and finally RTKit D-Bus. No scheduling D-Bus calls inside the render callback.
-- `audio_file.rs`: Symphonia decode to RAM buffers and basic offline linear resampling.
-- `src/bin/daw-audio-probe.rs`: safe device enumerator and explicit silent/tone probe.
-- `tests/rt_no_alloc.rs`: allocator guards around engine render paths including MIDI, PDC, timed automation, seek/stop and RAM sample buffers.
+`daw-core` owns musical time at 960 PPQ, tempo-map conversion, project tracks/clips/notes, scales, commands, plug-in state and instrument settings. JSON project loading preserves legacy `.slate.json` compatibility. Arrangement clips and Session slots have independent ownership. Stable IDs and migration validation protect that distinction. [Session contract](SESSION_ENGINE.md)
 
-Verified on the originally tested Linux workstation on 2026-11-16:
-- 33 tests passed across Phase 1 and Phase 2.
-- Strict Clippy, all workspace targets, no warnings.
-- Cargo formatting verification passed.
-- Native ALSA 44100 stream ran with SCHED_FIFO granted via existing realtime permissions.
-- Native JACK 48000 stream ran and callback already had real-time scheduler policy 1 (SCHED_FIFO).
-- Per-client `PIPEWIRE_LATENCY=128/48000` produced approximately 750 callbacks and 96000 frames over 2 sec; system metadata quantum stayed 1024.
-- Measurements confirm callbacks and scheduling, not measured xruns, round-trip latency, plugin safety, or audio fidelity.
+## Render engine
 
-Remaining Phase 2 production-hardening:
-- Capture/input stream and armed recording; hardware MIDI ports/clock synchronization.
-- Robust XRun reporting, real latency/CPU metering, varied hardware device support.
-- Professional resampler, disk-streaming, click-free sample seeking/voice releases, sample fade, phase-coherent edit playback.
-- Plugin-reported PDC integration, automation for arbitrary parameters, feedback/sidechain routing, safe graph hot swapping and deferred destruction.
-- Scheduling deadline instrumentation, stress tests with high track counts and 64/128 samples on multiple machines.
+`daw-engine` compiles a graph off the audio callback, schedules events against engine/project timing and applies bounded commands. The graph includes audio/MIDI sources, routing, native effects and instrument paths. Realtime allocation guards cover selected render operations, not every instruction inside the operating system, audio backend or external plug-in.
 
-## Phase 3: plugin hosting (NOT implemented)
+Audio decoding currently loads files into RAM and uses basic offline resampling. Native drivers expose PulseAudio, ALSA and JACK paths; availability and routing depend on the host. Requested buffer sizes and callback timestamps are not analogue round-trip latency measurements.
 
-- Separate worker process and shared-memory audio channel, CLAP and VST3/VST2 ABI.
-- Defer VST2 legality to separate implementation and distribution review.
-- A crashed worker may leave an audio deadline missed; isolation is not a guarantee of zero glitches.
+## Recording
 
-## Phase 4: Ableton .als interoperability (NOT implemented)
+The UI coordinates pinned source selection and a bounded capture queue. WAV writing and preview construction happen outside the realtime callback. The 22 November follow-up adds persisted physical-channel selection, selected-channel metering before recording, capture-driven elapsed time and a growing preview. Monitoring is controlled separately. Raw source levels and existing recordings remain unchanged.
 
-- Gzip XML format is only a container; version-dependent schema and proprietary plugin states need independent corpus validation.
-- Opaque XML preservation needs stable ordering and IDs; cannot promise lossless round-trip by default.
+## Plug-in execution
 
-## Phase 5: native UI (prototype implemented)
+`daw-plugin-host` is the companion process for scanning, offline rendering and live CLAP/VST3 processing. The live bridge uses bounded packets/deadlines and explicit failure behavior. Save/reopen support is verified for named classes, not every plug-in. Worker failure handling does not establish a security boundary. Offline Arrangement export currently guards enabled live inserts.
 
-- The committed baseline includes an egui desktop shell, Arrangement editor, integrated mixer controls, scale-aware MIDI piano roll and Session grid overview.
-- Session independent clip launching, plugin chain hosting, full device mapping and production-grade UI polish are not implemented.
-- A searchable sample/plugin browser is under active parallel development and must be integrated/retested before being marked merged.
+## UI and integration boundary
 
-## Technical caveats
+`daw-ui` contains the native egui application and `studio_*` modules for Arrangement, Session, piano roll, browser, devices, recording, export and history. The UI and worker are installed as a matched versioned pair. Topology changes and stream recovery still need careful off-thread handling and runtime tests.
 
-- JACK/CPAL and ALSA internals can block or allocate, even though the isolated Rust engine render tests do not.
-- Relative end-to-end latency combines device, OS, converters and potentially extra buffering; sample quantum by itself is not a measurement.
-- Latency compensation calculates declared paths, but without real plugin processing no independent PDC null test has yet been done.
-- Sine synth is a diagnostic only and has no production envelopes or sample-accurate voice-steal behavior.
+`daw-parser` and `daw-host-client` remain reserved scaffolding. The separate Autonatural Lab invokes a pinned offline DSP process; it is not a merged main-DAW subsystem.
+
+## Engineering constraints
+
+Keep disk I/O, allocation, scanning and graph construction out of the callback. Bound queues and preview storage. Preserve source media and old saves. Measure startup, repeated seeks, MIDI state, worker failure, device loss and reopen behavior independently. Publish unsupported cases rather than inferring universal behavior from one successful probe.

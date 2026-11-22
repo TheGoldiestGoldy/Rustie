@@ -40,3 +40,8 @@ scratch/
 *.so
 *.dll
 *.dylib
+
+*.rusty.json
+*.sf2
+!crates/daw-engine/tests/fixtures/qa-two-programs.sf2
+*.zip

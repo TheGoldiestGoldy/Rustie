@@ -1,3 +1,5 @@
+> Historical design/implementation notes. For current capabilities and gates, see [project status](PROJECT_STATUS.md) and [architecture](ARCHITECTURE.md).
+
 # Codebase map
 
 ## Dependency direction

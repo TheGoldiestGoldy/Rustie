@@ -8,3 +8,6 @@ description = "Pure musical time, scale, project, and edit primitives for a nati
 
 [dependencies]
 serde.workspace = true
+
+[dev-dependencies]
+serde_json = "1"

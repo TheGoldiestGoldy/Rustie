@@ -1,54 +1,29 @@
-# Project status and evidence register
+# Current project status — 22 November 2026
 
-**Snapshot:** 2026-11-17, committed baseline `f578b9a`; original branch `master`. The UI and documentation agents are editing the original worktree concurrently. This scaffold was created in a separate branch, `docs/github-scaffold-20261117`, to avoid overriding those edits.
+**Development preview. Beta 1 remains NO-GO. Both requested agent updates are not fully accepted.**
 
-## Status vocabulary
+## Latest workstreams
 
-- **Verified in source:** Confirmed by reading checked-in Rust code; may still fail in a particular device or build.
-- **Historically tested:** Described as tested in commit-time notes (2026-11-16); not independently re-benchmarked during this documentation pass.
-- **In progress:** Observed uncommitted work by a separate agent, explicitly not part of this Git snapshot.
-- **Prototype:** A usable partial path that does not meet production acceptance criteria.
-- **Absent:** No functional implementation was identified.
+| Workstream | Implementation | Verification and remaining work |
+|---|---|---|
+| Microphone workflow | Persisted Mono 1 / Mono 2 / Stereo input choice, input meter before REC, capture-driven timer and waveform, centered mono playback | Agent implementation/handoff completed; headphone acceptance still open. Scoped mic build: 159 passing tests, eight realtime allocation guards, two opt-in PulseAudio tests ignored by default. Native AIR recording/save/reopen/replay/export and stereo preservation exercised. Owner confirmed pre-REC meter movement. Clear spoken playback in both headphones remains unconfirmed. |
+| Arrangement click-to-seek | Working-tree code adds release-click seeking on ruler/empty lanes/clip bodies, pinned ruler, tempo-map coordinates and queued seeks without reopening the stream | Agent stopped at a usage limit before completing compiled-app/audio acceptance and final handoff. Included as unfinished development work, not a completed fix. Repeated-seek latency, real pointer exclusions, scrolling/zoom and heard MIDI/audio position still require acceptance. |
+| Publication | Current source snapshot, public-facing pitch, documentation, gallery and history | Combined snapshot checks are recorded in [verification](VERIFICATION.md). Publication does not install a new desktop build or close release gates. |
 
-## Inventory
+The [mic workflow report](agent-reports/2026-11-22-mic-workflow.md) separates native interaction, PCM measurements and owner listening. Its mic-only build deliberately excluded concurrent seek edits. Its 159-test result must not be attributed to the combined snapshot.
 
-| Subsystem | Evidence | Status |
-| --- | --- | --- |
-| Workspace | Root `Cargo.toml`, six workspace members, edition 2024, Rust 1.85 minimum | Verified in source |
-| Musical clock | `daw-core/src/time.rs`: 960 PPQ, TempoMap with sample-frame conversion | Verified in source |
-| Scales | `daw-core/src/scales.rs`: twelve modes, MIDI pitch membership, scale fold math | Verified in source |
-| Project model | `daw-core/src/model.rs`: tracks, clips, MIDI notes, audio paths, mixer flags | Verified in source |
-| Undo/redo core | `daw-core/src/commands.rs` command stack, NOT yet comprehensive UI integration | Verified in source |
-| Graph | `daw-engine/src/graph.rs`: DAG routing, buffers, PDC for declared latency | Verified in source |
-| Playback | `daw-engine/src/engine.rs`: queue, scheduled commands, MIDI voice, gain ramps | Verified in source |
-| Native output | `daw-engine/src/driver.rs`: CPAL ALSA/PulseAudio/JACK, 44.1/48/96 kHz validation | Verified in source |
-| Audio decoding | `daw-engine/src/audio_file.rs`: Symphonia decode and simple linear resampling | Verified in source |
-| Arrangement | `daw-ui/src/studio_views.rs`: mixer headers, clip interactions, ruler | Prototype |
-| MIDI editor | `daw-ui/src/studio.rs`: root/mode, fold, editing | Prototype |
-| Session view | `daw-ui/src/studio_views.rs`: grid drawing and selection, no launch | Prototype |
-| Project read/write | `daw-ui/src/studio.rs`: JSON save/open using serde_json | Prototype |
-| Asset browser | `studio_browser.rs` seen uncommitted in live worktree, with sample scan / plugin discovery | In progress, not merged in baseline |
-| CLAP/VST3/LV2 execution | Placeholder crates; no functional plugin ABI/worker bridge | Absent |
-| Audio recording | No input stream / record arm path | Absent |
-| MIDI hardware | No MIDI device I/O | Absent |
-| .als compatibility | `daw-parser` placeholder, no importer | Absent |
+## What we have established
 
-## Relevant existing commits
+The 21 November integration demonstrated native Arrangement editing, independent Session scenes, native effects persistence, SoundFont audition, named CLAP/VST3 classes and save/cold-reopen behavior. It passed 154 tests, including eight realtime allocation guards. A virtual capture ran 615.816 seconds with zero reported dropped frames and exported after reopening.
 
-1. `007a15d` (2026-11-16) Implement native Rust DAW core and Phase 2 audio engine
-2. `48a1eb8` (2026-11-16) Route audio probe through native PulseAudio and expose output level
-3. `f578b9a` (2026-11-17) Improve Slate Studio arrangement UI and low-latency playback
+The 22 November mic candidate captured an 11.27-second mono AIR take with zero dropped input frames. Solo playback PCM was identical left/right at centered pan; exported overlapping samples matched the mono source. Imported stereo retained its two channels. The owner subsequently confirmed the meter and saved another mono take. These facts do not replace headphone listening or analogue alignment measurements.
 
-These are original local repository commits; the clean public GitHub snapshot may not preserve those Git SHA objects or their commit ancestry.
+## Source identity
 
-## Historical machine-side checks
+The publication preserves the existing GitHub `main` history rooted at public commit `d20a4f3f555ce9d0f0725b4a85f290b753e9b2f1`. Application source was copied from `beta/integration` base `bf52dee0003b` plus the observed mic and unfinished seek working-tree changes into an isolated publication checkout. The original development worktree was not reset, committed or installed by this documentation pass.
 
-Previous docs record 33 passing tests, strict Clippy, formatting checks, native ALSA 44.1 kHz and JACK 48 kHz callbacks as of Nov 16. They also record an audible-playback-routing fault and a report of a noticeable visual/audio playback delay. **Revalidate after each engine/driver change**. No current xrun histogram, loopback latency, MIDI timing variance, high-track-count stress benchmark or plugin crash-recovery result exists.
+The exact source-file hashes are in [source snapshot manifest](source-snapshot-sha256.json). Historical local commit IDs identify the original development history; those Git objects are not necessarily ancestors of the public snapshot. Screenshots identify their own candidate or baseline and are not falsely attributed to the publication build.
 
-## Known documentation drift
+## Still open
 
-The original architecture notes had incorrectly called Phase 5 UI "NOT implemented"; this documentation branch corrects it to **prototype implemented**. The baseline contains a graphical desktop app, but many professional workflows are absent. Keep architecture and status documents in sync after each merge.
-
-## Updating this document
-
-On every significant merge: record commit SHA/date, feature acceptance proof, exact tests, machine/driver, reproduction steps for residual defects and any file-format changes. Avoid unqualified "fully working" claims.
+Output startup reliability, owner headphone clarity, reference-transient hardware alignment, measured analogue latency and backend XRUN/deadline evidence; complete live-insert print/export workflow; broader plug-in/device and long-session recovery coverage; distribution and contributor notices. [Release decision](BETA1_RELEASE_DECISION.md) · [Limitations](KNOWN_LIMITATIONS.md) · [Roadmap](ROADMAP.md)

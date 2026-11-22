@@ -4,6 +4,7 @@
 //! The audio callback is the sole owner of AudioGraph; no mutex, heap allocation,
 //! filesystem access, or blocking calls are used in process_interleaved.
 
+use crate::live_plugin::LiveMidiMessage;
 use std::sync::{
     Arc,
     atomic::{AtomicU32, AtomicU64, Ordering},
@@ -21,6 +22,8 @@ const MAX_GAIN_RAMPS: usize = 64;
 pub enum EngineCommand {
     Play,
     Stop,
+    /// Allow live instrument audition without advancing transport or samples.
+    SetMonitoring(bool),
     Seek {
         project_frame: u64,
     },
@@ -52,6 +55,29 @@ pub enum EngineCommand {
         node: u32,
         note: u8,
     },
+    LiveMidi {
+        node: u32,
+        channel: u8,
+        message: LiveMidiMessage,
+    },
+    ControlChange {
+        node: u32,
+        controller: u8,
+        value: u8,
+    },
+    ProgramChange {
+        node: u32,
+        program: u8,
+    },
+    /// Silence this clip's instrument without resetting other Session voices.
+    AllNotesOff {
+        node: u32,
+    },
+    /// Align a preloaded audio loop with its clip's next quantized launch.
+    SetLoopStart {
+        node: u32,
+        project_frame: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,6 +93,8 @@ pub struct EngineTelemetry {
     pub rendered_frames: AtomicU64,
     pub project_frame: AtomicU64,
     pub callbacks: AtomicU64,
+    /// Last Arrangement seek rendered; acquire after reading this before using position.
+    pub arrangement_seek_revision: AtomicU64,
     pub queue_overflows: AtomicU64,
     pub pending_overflows: AtomicU64,
     pub gain_ramp_overflows: AtomicU64,
@@ -79,8 +107,28 @@ pub struct EngineTelemetry {
 }
 
 pub struct Controller {
-    queue: Producer<ScheduledCommand>,
+    queue: Producer<QueuedCommand>,
+    sessions: Producer<crate::session::SessionLaunch>,
     telemetry: Arc<EngineTelemetry>,
+}
+
+#[derive(Clone, Copy)]
+enum QueuedCommand {
+    Engine(ScheduledCommand),
+    Arrangement {
+        project_frame: u64,
+        command: EngineCommand,
+    },
+    SeekArrangement {
+        project_frame: u64,
+        revision: u64,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct PendingCommand {
+    event: ScheduledCommand,
+    arrangement: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,13 +137,54 @@ pub enum QueueError {
 }
 
 impl Controller {
+    /// One SPSC publication admits or rejects an entire multi-track launch.
+    pub fn launch_session(
+        &mut self,
+        launch: crate::session::SessionLaunch,
+    ) -> Result<(), QueueError> {
+        self.sessions.push(launch).map_err(|_| {
+            self.telemetry
+                .queue_overflows
+                .fetch_add(1, Ordering::Relaxed);
+            QueueError::Full
+        })
+    }
+
     /// Schedule at a precise *absolute* engine frame.
     pub fn schedule(&mut self, command: ScheduledCommand) -> Result<(), QueueError> {
+        self.enqueue(QueuedCommand::Engine(command))
+    }
+
+    fn enqueue(&mut self, command: QueuedCommand) -> Result<(), QueueError> {
         self.queue.push(command).map_err(|_| {
             self.telemetry
                 .queue_overflows
                 .fetch_add(1, Ordering::Relaxed);
             QueueError::Full
+        })
+    }
+
+    /// Ordered barrier: discard old Arrangement events and reset voices without
+    /// reopening the device. Subsequent events use the new project clock.
+    pub fn seek_arrangement(
+        &mut self,
+        project_frame: u64,
+        revision: u64,
+    ) -> Result<(), QueueError> {
+        self.enqueue(QueuedCommand::SeekArrangement {
+            project_frame,
+            revision,
+        })
+    }
+
+    pub fn schedule_arrangement(
+        &mut self,
+        project_frame: u64,
+        command: EngineCommand,
+    ) -> Result<(), QueueError> {
+        self.enqueue(QueuedCommand::Arrangement {
+            project_frame,
+            command,
         })
     }
 
@@ -127,26 +216,33 @@ struct GainRamp {
 
 pub struct RenderEngine {
     graph: AudioGraph,
-    commands: Consumer<ScheduledCommand>,
+    commands: Consumer<QueuedCommand>,
+    sessions: Consumer<crate::session::SessionLaunch>,
     telemetry: Arc<EngineTelemetry>,
-    pending: [Option<ScheduledCommand>; MAX_PENDING_COMMANDS],
+    pending: [Option<PendingCommand>; MAX_PENDING_COMMANDS],
     pending_len: usize,
     gain_ramps: [Option<GainRamp>; MAX_GAIN_RAMPS],
     engine_frame: u64,
     project_frame: u64,
     playing: bool,
+    monitoring: bool,
+    arrangement_origin: (u64, u64),
+    arrangement_seek_revision: u64,
 }
 
 pub fn create_engine(graph: AudioGraph) -> (Controller, RenderEngine) {
     let (queue, commands) = RingBuffer::new(COMMAND_RING_CAPACITY);
+    let (session_queue, sessions) = RingBuffer::new(16);
     let telemetry = Arc::new(EngineTelemetry::default());
     let controller = Controller {
         queue,
+        sessions: session_queue,
         telemetry: Arc::clone(&telemetry),
     };
     let engine = RenderEngine {
         graph,
         commands,
+        sessions,
         telemetry,
         pending: [None; MAX_PENDING_COMMANDS],
         pending_len: 0,
@@ -154,6 +250,9 @@ pub fn create_engine(graph: AudioGraph) -> (Controller, RenderEngine) {
         engine_frame: 0,
         project_frame: 0,
         playing: false,
+        monitoring: false,
+        arrangement_origin: (0, 0),
+        arrangement_seek_revision: 0,
     };
     (controller, engine)
 }
@@ -177,7 +276,44 @@ impl RenderEngine {
 
     fn drain_inbox(&mut self) {
         // SPSC queue is bounded. Every command is Copy, so popped payloads cannot free memory.
-        while let Ok(event) = self.commands.pop() {
+        while let Ok(queued) = self.commands.pop() {
+            let (event, arrangement) = match queued {
+                QueuedCommand::Engine(event) => (event, false),
+                QueuedCommand::Arrangement {
+                    project_frame,
+                    command,
+                } => {
+                    let (engine, project) = self.arrangement_origin;
+                    (
+                        ScheduledCommand {
+                            at_engine_frame: engine
+                                .saturating_add(project_frame.saturating_sub(project)),
+                            command,
+                        },
+                        true,
+                    )
+                }
+                QueuedCommand::SeekArrangement {
+                    project_frame,
+                    revision,
+                } => {
+                    // Compact in place; never allocate or drop heap objects in the callback.
+                    let mut keep = 0;
+                    for index in 0..self.pending_len {
+                        if self.pending[index].is_some_and(|pending| !pending.arrangement) {
+                            self.pending[keep] = self.pending[index];
+                            keep += 1;
+                        }
+                    }
+                    self.pending[keep..self.pending_len].fill(None);
+                    self.pending_len = keep;
+                    self.graph.reset();
+                    self.project_frame = project_frame;
+                    self.arrangement_origin = (self.engine_frame, project_frame);
+                    self.arrangement_seek_revision = revision;
+                    continue;
+                }
+            };
             if self.pending_len == MAX_PENDING_COMMANDS {
                 self.telemetry
                     .pending_overflows
@@ -188,12 +324,12 @@ impl RenderEngine {
             let mut index = self.pending_len;
             while index > 0
                 && self.pending[index - 1]
-                    .is_some_and(|entry| entry.at_engine_frame > event.at_engine_frame)
+                    .is_some_and(|entry| entry.event.at_engine_frame > event.at_engine_frame)
             {
                 self.pending[index] = self.pending[index - 1];
                 index -= 1;
             }
-            self.pending[index] = Some(event);
+            self.pending[index] = Some(PendingCommand { event, arrangement });
             self.pending_len += 1;
         }
     }
@@ -201,7 +337,7 @@ impl RenderEngine {
     fn dispatch_due(&mut self) {
         while self.pending_len > 0 {
             let Some(front) = self.pending[0] else { break };
-            if front.at_engine_frame > self.engine_frame {
+            if front.event.at_engine_frame > self.engine_frame {
                 break;
             }
             // Shift remaining Copy event handles, never reallocates.
@@ -210,8 +346,9 @@ impl RenderEngine {
             }
             self.pending_len -= 1;
             self.pending[self.pending_len] = None;
-            match front.command {
+            match front.event.command {
                 EngineCommand::Play => self.playing = true,
+                EngineCommand::SetMonitoring(enabled) => self.monitoring = enabled,
                 EngineCommand::Stop => {
                     self.playing = false;
                     self.graph.reset();
@@ -243,6 +380,26 @@ impl RenderEngine {
                     self.graph.note_on(node, note, velocity);
                 }
                 EngineCommand::NoteOff { node, note } => self.graph.note_off(node, note),
+                EngineCommand::LiveMidi {
+                    node,
+                    channel,
+                    message,
+                } => self.graph.live_midi(node, channel, message),
+                EngineCommand::ControlChange {
+                    node,
+                    controller,
+                    value,
+                } => self.graph.control_change(node, controller, value),
+                EngineCommand::ProgramChange { node, program } => {
+                    self.graph.program_change(node, program);
+                }
+                EngineCommand::AllNotesOff { node } => self.graph.all_notes_off(node),
+                EngineCommand::SetLoopStart {
+                    node,
+                    project_frame,
+                } => {
+                    self.graph.set_loop_start(node, project_frame);
+                }
             }
         }
     }
@@ -307,6 +464,8 @@ impl RenderEngine {
             let result = self.graph.render_frame(self.project_frame);
             self.project_frame = self.project_frame.saturating_add(1);
             result
+        } else if self.monitoring {
+            self.graph.render_midi_frame(self.project_frame)
         } else {
             StereoFrame::ZERO
         };
@@ -322,6 +481,12 @@ impl RenderEngine {
             return;
         }
         self.drain_inbox();
+        for _ in 0..16 {
+            let Ok(launch) = self.sessions.pop() else {
+                break;
+            };
+            self.graph.queue_session(&launch, self.project_frame);
+        }
         let mut peak = 0.0_f32;
         let mut chunks = data.chunks_exact_mut(channels);
         for frame in &mut chunks {
@@ -350,6 +515,9 @@ impl RenderEngine {
         self.telemetry
             .project_frame
             .store(self.project_frame, Ordering::Relaxed);
+        self.telemetry
+            .arrangement_seek_revision
+            .store(self.arrangement_seek_revision, Ordering::Release);
         self.telemetry.callbacks.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -388,6 +556,70 @@ mod tests {
             .add_node(NodeSpec::master(10))
             .route(1, 10, 1.0);
         create_engine(builder.build().unwrap())
+    }
+
+    #[test]
+    fn repeated_arrangement_seek_rebases_events_and_cancels_stale_notes() {
+        let mut builder = GraphBuilder::new(48_000);
+        builder
+            .add_node(NodeSpec::midi(1))
+            .add_node(NodeSpec::master(10))
+            .route(1, 10, 1.0);
+        let (mut ui, mut engine) = create_engine(builder.build().unwrap());
+        ui.immediate(EngineCommand::Play).unwrap();
+        let on = EngineCommand::NoteOn {
+            node: 1,
+            note: 60,
+            velocity: 100,
+        };
+        let off = EngineCommand::NoteOff { node: 1, note: 60 };
+        let mut out = [0.0; 256];
+        for (revision, target) in [10_000, 200, 80_000, 0, 8_000].into_iter().enumerate() {
+            // Future events already in pending storage AND still in the inbox
+            // must disappear at the barrier, without cancelling mixer commands.
+            ui.schedule_arrangement(engine.project_frame() + 256, on)
+                .unwrap();
+            engine.process_interleaved(&mut out, 2);
+            ui.schedule_arrangement(engine.project_frame() + 200, on)
+                .unwrap();
+            ui.immediate(EngineCommand::SetPan { node: 1, pan: 0.0 })
+                .unwrap();
+            ui.seek_arrangement(target, revision as u64 + 1).unwrap();
+            ui.schedule_arrangement(target, on).unwrap();
+            ui.schedule_arrangement(target + 64, off).unwrap();
+            engine.process_interleaved(&mut out, 2);
+            assert!(engine.playing());
+            assert_eq!(engine.project_frame(), target + 128);
+            assert!(out[..128].iter().any(|sample| sample.abs() > 0.01));
+            assert_eq!(
+                ui.telemetry()
+                    .arrangement_seek_revision
+                    .load(Ordering::Acquire),
+                revision as u64 + 1
+            );
+            // Let note release finish and pass both stale note-on deadlines.
+            for _ in 0..100 {
+                engine.process_interleaved(&mut out, 2);
+            }
+            assert!(
+                out.iter().all(|sample| sample.abs() < 0.00001),
+                "stale/stuck MIDI after seek"
+            );
+        }
+    }
+
+    #[test]
+    fn arrangement_seek_reads_exact_audio_destination_without_stopping() {
+        let (mut ui, mut engine) = fixture();
+        ui.immediate(EngineCommand::Play).unwrap();
+        let mut out = [0.0; 8];
+        for (target, expected) in [(4, 0.5), (40, 0.0), (0, 0.5)] {
+            ui.seek_arrangement(target, target + 1).unwrap();
+            engine.process_interleaved(&mut out, 2);
+            assert_eq!(out[0], expected);
+            assert_eq!(engine.project_frame(), target + 4);
+            assert!(engine.playing());
+        }
     }
 
     #[test]
@@ -480,7 +712,12 @@ mod tests {
         .unwrap();
         let mut out = [0.0_f32; 14];
         engine.process_interleaved(&mut out, 2);
-        let left = out.chunks_exact(2).map(|f| f[0]).collect::<Vec<_>>();
+        let left = out
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|f| f[0])
+            .collect::<Vec<_>>();
         assert_eq!(left, vec![0.5, 0.5, 0.375, 0.25, 0.125, 0.0, 0.0]);
     }
 
@@ -500,9 +737,164 @@ mod tests {
     }
 
     #[test]
+    fn session_switch_is_sample_accurate_without_restarting_transport() {
+        // Two preloaded loops share an existing graph and one uninterrupted engine.
+        let mut builder = GraphBuilder::new(48_000);
+        let frame = |v| StereoFrame { left: v, right: v };
+        builder.add_node(NodeSpec::audio(
+            1,
+            Source::LoopedSamples {
+                frames: vec![frame(0.2); 16].into(),
+                start_frame: 0,
+                loop_frames: 16,
+                source_offset_frames: 0,
+                gain: 1.0,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
+            },
+        ));
+        let mut next = NodeSpec::audio(
+            2,
+            Source::LoopedSamples {
+                frames: vec![frame(0.7), frame(0.8)].into(),
+                start_frame: 0,
+                loop_frames: 2,
+                source_offset_frames: 0,
+                gain: 1.0,
+                fade_in_frames: 0,
+                fade_out_frames: 0,
+            },
+        );
+        next.gain = 0.0;
+        builder.add_node(next).add_node(NodeSpec::master(10));
+        builder.route(1, 10, 1.0).route(2, 10, 1.0);
+        let (mut controller, mut engine) = create_engine(builder.build().unwrap());
+        controller.immediate(EngineCommand::Play).unwrap();
+        for command in [
+            EngineCommand::SetGain { node: 1, gain: 0.0 },
+            EngineCommand::SetLoopStart {
+                node: 2,
+                project_frame: 4,
+            },
+            EngineCommand::SetGain { node: 2, gain: 1.0 },
+        ] {
+            controller
+                .schedule(ScheduledCommand {
+                    at_engine_frame: 4,
+                    command,
+                })
+                .unwrap();
+        }
+        let mut out = [0.0_f32; 16];
+        engine.process_interleaved(&mut out, 2);
+        let left: Vec<_> = out.as_chunks::<2>().0.iter().map(|s| s[0]).collect();
+        assert_eq!(left, vec![0.2, 0.2, 0.2, 0.2, 0.7, 0.8, 0.7, 0.8]);
+        assert_eq!(engine.engine_frame(), 8);
+        assert_eq!(engine.project_frame(), 8);
+    }
+
+    #[test]
+    fn session_midi_all_notes_off_does_not_reset_other_clip() {
+        let mut builder = GraphBuilder::new(48_000);
+        builder
+            .add_node(NodeSpec::midi(1))
+            .add_node(NodeSpec::midi(2));
+        builder.add_node(NodeSpec::master(10));
+        builder.route(1, 10, 1.0).route(2, 10, 1.0);
+        let (mut controller, mut engine) = create_engine(builder.build().unwrap());
+        controller.immediate(EngineCommand::Play).unwrap();
+        controller
+            .immediate(EngineCommand::NoteOn {
+                node: 1,
+                note: 69,
+                velocity: 100,
+            })
+            .unwrap();
+        controller
+            .immediate(EngineCommand::NoteOn {
+                node: 2,
+                note: 72,
+                velocity: 100,
+            })
+            .unwrap();
+        let mut out = [0.0_f32; 128];
+        engine.process_interleaved(&mut out, 2);
+        controller
+            .immediate(EngineCommand::AllNotesOff { node: 1 })
+            .unwrap();
+        engine.process_interleaved(&mut out, 2);
+        assert!(
+            out.iter().any(|value| value.abs() > 0.001),
+            "other independent MIDI clip must keep sounding"
+        );
+        controller
+            .immediate(EngineCommand::AllNotesOff { node: 2 })
+            .unwrap();
+        engine.process_interleaved(&mut out, 2);
+        assert!(
+            out.iter().all(|value| *value == 0.0),
+            "both MIDI clips should now be silent"
+        );
+    }
+
+    #[test]
     fn invalid_floats_are_sanitized_at_output() {
         assert_eq!(sanitize(f32::NAN), 0.0);
         assert_eq!(sanitize(f32::INFINITY), 0.0);
         assert_eq!(sanitize(-2.0), -1.0);
+    }
+}
+
+#[cfg(test)]
+mod midi_monitor_regression {
+    use super::*;
+    use crate::graph::{GraphBuilder, NodeSpec, Source};
+
+    #[test]
+    fn stopped_monitor_plays_midi_without_playing_audio_or_advancing_song() {
+        let mut builder = GraphBuilder::new(44_100);
+        builder.add_node(NodeSpec::midi(1));
+        builder.add_node(NodeSpec::audio(
+            2,
+            Source::Tone {
+                frequency_hz: 440.0,
+                phase: 0.0,
+            },
+        ));
+        builder.add_node(NodeSpec::master(3));
+        builder.route(1, 3, 1.0);
+        builder.route(2, 3, 1.0);
+        let (mut commands, mut engine) = create_engine(builder.build().unwrap());
+        commands
+            .immediate(EngineCommand::SetMonitoring(true))
+            .unwrap();
+        commands
+            .immediate(EngineCommand::NoteOn {
+                node: 1,
+                note: 60,
+                velocity: 100,
+            })
+            .unwrap();
+        let mut output = [0.0_f32; 512];
+        engine.process_interleaved(&mut output, 2);
+        assert!(output.iter().any(|sample| sample.abs() > 0.005));
+        assert!(!engine.playing());
+        assert_eq!(
+            engine.project_frame(),
+            0,
+            "audition must not move the playhead"
+        );
+
+        commands
+            .immediate(EngineCommand::SetMonitoring(false))
+            .unwrap();
+        output.fill(1.0);
+        engine.process_interleaved(&mut output, 2);
+        assert!(output.iter().all(|sample| *sample == 0.0));
+
+        commands.immediate(EngineCommand::Play).unwrap();
+        engine.process_interleaved(&mut output, 2);
+        assert!(output.iter().any(|sample| sample.abs() > 0.005));
+        assert!(engine.project_frame() > 0);
     }
 }

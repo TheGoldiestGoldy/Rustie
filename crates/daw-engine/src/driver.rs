@@ -264,9 +264,16 @@ fn select_device(
             continue;
         };
         let fixed = match (backend, selected.buffer_size()) {
+            // Diagnostic only. Some PulseAudio servers stall after the very
+            // first write when using short fixed-period adjust_latency.
+            (Backend::PulseAudio, _)
+                if std::env::var_os("RUSTIE_PULSE_DEFAULT_BUFFER").is_some() =>
+            {
+                None
+            }
             // JACK quantum is server controlled; PulseAudio can honor a fixed period.
             // Using Pulse's default buffer silently requests very large prebuffering
-            // and produced ~2 seconds of audible delay on the originally tested Linux host.
+            // and produced ~2 seconds of audible delay on the initial Linux test workstation.
             (Backend::Jack, _) => None,
             (_, SupportedBufferSize::Range { min, max })
                 if desired.buffer_frames >= *min && desired.buffer_frames <= *max =>

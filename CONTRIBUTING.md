@@ -1,19 +1,16 @@
-# Contributing to Slate Studio
+# Contributing to Rusty
 
-Thanks for helping make a functional native Rust DAW. This is pre-release software and changes need a reproducible verification trail.
+Rusty is a development preview. Start with the [current status](docs/PROJECT_STATUS.md), [architecture](docs/ARCHITECTURE.md), [developer setup](docs/DEVELOPMENT.md) and [agent instructions](AGENTS.md).
 
-Before coding, read [DEVELOPMENT](docs/DEVELOPMENT.md), [PROJECT_STATUS](docs/PROJECT_STATUS.md), [AGENT_HANDOFF](docs/AGENT_HANDOFF.md), and [LEGAL_AND_ASSETS](docs/LEGAL_AND_ASSETS.md).
-
-Use topic branches/worktrees. Don't overwrite a co-author's dirty tree. Provide a small PR: what changed, what is working, disabled or unfinished features, screenshots for UI changes, and tests.
+Use a topic branch or isolated worktree and preserve other contributors' changes. Explain the concrete user behavior, source baseline, verification and remaining limits. Include real native screenshots for UI changes and a dated report in `docs/agent-reports/`.
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --locked --release -p daw-ui -p daw-plugin-host
 ```
 
-Audio-thread changes must preserve real-time constraints and include allocation/timing reasoning. Report hardware details for audio smoke tests, but redact identifiers and personal data from logs.
+Audio callback changes must preserve bounded work and document allocation/timing implications. Test migration and recovery when changing saved data. A compile or nonzero PCM result is not headphone acceptance. Do not upload personal recordings/projects, secrets, installed plug-ins or proprietary sample banks.
 
-For bugs, include minimal self-created repro, commit SHA, environment, expected vs actual behavior, and relevant diagnostics. Do not upload copyrighted sample packs, plugins, sessions or recordings.
-
-License metadata currently says `MIT OR Apache-2.0`; before external public contributions the maintainer must confirm a complete licensing and contributor rights policy.
+The existing license declaration is MIT OR Apache-2.0. Contributor-rights confirmation and complete distribution notices remain release gates; see [asset and license notes](docs/LEGAL_AND_ASSETS.md).
