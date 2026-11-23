@@ -228,10 +228,14 @@ pub const DEFAULT_PRESET: InstrumentPreset = InstrumentPreset {
 /// file name (not a path) found in `assets/soundfonts/`; `preset` is a curated
 /// catalog name. Old projects omit this field and fall back to the built-in
 /// sine synth until a SoundFont is loaded.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BuiltinInstrument {
     pub bank: String,
     pub preset: String,
+    /// Native LNF-1 parameter payload. Omitted for SoundFont assignments and
+    /// for old projects, so their serialized representation stays compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lnf1_params: Option<[f32; 20]>,
 }
 
 impl BuiltinInstrument {
@@ -239,6 +243,15 @@ impl BuiltinInstrument {
         Self {
             bank: bank.into(),
             preset: preset.into(),
+            lnf1_params: None,
+        }
+    }
+
+    pub fn lnf1(params: [f32; 20]) -> Self {
+        Self {
+            bank: "lnf-1".into(),
+            preset: "lnf-1".into(),
+            lnf1_params: Some(params),
         }
     }
 
@@ -286,5 +299,22 @@ mod tests {
         let kit = resolve_preset("Standard Kit").unwrap();
         assert!(kit.is_drum());
         assert_eq!(kit.channel, 9);
+    }
+
+    #[test]
+    fn lnf1_parameters_round_trip_without_changing_soundfont_schema() {
+        let values = core::array::from_fn(|index| index as f32 * 0.5);
+        let lnf = BuiltinInstrument::lnf1(values);
+        let encoded = serde_json::to_value(&lnf).unwrap();
+        assert_eq!(encoded["bank"], "lnf-1");
+        assert_eq!(encoded["lnf1_params"].as_array().unwrap().len(), 20);
+        assert_eq!(
+            serde_json::from_value::<BuiltinInstrument>(encoded).unwrap(),
+            lnf
+        );
+
+        let soundfont =
+            serde_json::to_value(BuiltinInstrument::new("bank.sf2", "Acoustic Piano")).unwrap();
+        assert!(soundfont.get("lnf1_params").is_none());
     }
 }
