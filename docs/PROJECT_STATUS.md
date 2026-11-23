@@ -1,6 +1,15 @@
-# Current project status — 22 November 2026
+# Current project status — 23 November 2026
 
 **Development preview. Beta 1 remains NO-GO. Both requested agent updates are not fully accepted.**
+
+## 23 November experimental instrument branch (draft, not merged)
+
+The separate instrument branch adds two foundations:
+
+- **sf-16:** a 16-channel SoundFont engine with per-part program, controller, tuning, sustain, pitch-bend and mute/solo state. The engine and MIDI plumbing are implemented; a dedicated 16-part editor is not.
+- **LNF-1:** an original 32-voice piano-style instrument and native Devices panel. Its 20 parameters persist per track and update active sources through atomics. It is not sample-parity with the referenced GPL plug-in and includes no third-party samples.
+
+The combined branch independently passed **173 workspace tests**, with **two opt-in PulseAudio tests ignored**, plus formatting, strict Clippy and a release UI build. This is code-level evidence only: manual LNF-1 GUI acceptance, physical MIDI, speaker/headphone listening and hardware latency were not tested. General host automation/undo and LNF-1 telemetry remain unfinished. Beta 1 remains **NO-GO**.
 
 ## Latest workstreams
 

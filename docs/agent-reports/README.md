@@ -2,6 +2,7 @@
 
 Each report applies to its own source snapshot. Local QA artifacts are described but not distributed. See [current status](../PROJECT_STATUS.md), [verification](../VERIFICATION.md) and [screenshots](../SCREENSHOTS.md).
 
+- [2026-11-23-sf16-multitimbral-engine](2026-11-23-sf16-multitimbral-engine.md)
 - [2026-11-22-pulse-input-connection-limit](2026-11-22-pulse-input-connection-limit.md)
 - [2026-11-22-mic-workflow](2026-11-22-mic-workflow.md)
 - [2026-11-22-mic-track-ui](2026-11-22-mic-track-ui.md)
