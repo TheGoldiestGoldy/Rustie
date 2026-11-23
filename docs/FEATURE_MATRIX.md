@@ -1,4 +1,4 @@
-# Feature matrix — development snapshot, 22 November 2026
+# Feature matrix — development snapshot, 23 November 2026
 
 The 21 November baseline and 22 November follow-ups have different verification scopes. See [current status](PROJECT_STATUS.md) and [verification](VERIFICATION.md). Later dated notes below are historical.
 
@@ -17,6 +17,8 @@ Legend: Implemented = functional in source and compiled; Partial = usable but wi
 | LV2 discovery | Discovery only | Indexed but no DSP host |
 | Built-in 16-voice sine instrument | Implemented | Default for legacy and unassigned MIDI tracks. |
 | Built-in SoundFont instrument | Implemented / bank-dependent | Local GM bank and per-track preset, mouse and computer-key audition, audio-thread swap regression and legacy fallback. No bank is distributed with the app. |
+| 16-channel SoundFont engine (sf-16) | Engine foundation / dedicated UI incomplete | Per-channel program, controllers, tuning, sustain, pitch bend and mute/solo; allocation-guarded render path. No production bank is bundled. |
+| LNF-1 native piano device | Partial / experimental | Original 32-voice engine, 20 persisted per-track parameters and atomic live updates. No sample parity, general host automation/undo, telemetry or manual GUI/audio acceptance. |
 | Piano root/mode across 12 scales, key highlighting and fold | Implemented | `studio_piano.rs`, `daw-core/src/scales.rs` |
 | MIDI note creation, move, resize, delete, duplicate, velocity | Partial / GUI test pending | Integrated `studio_piano.rs` and `studio_history.rs` have bounded document undo/redo and velocity-lane manipulation; code tests passed, manual gesture proof absent |
 | Snap granularity 1/4..1/32, note length, in-key restriction | Implemented | `studio_piano.rs` |
@@ -74,3 +76,5 @@ Round 2 verification: `cargo test --workspace` 43 passed; strict Clippy, format,
 ## Relevant source files
 - New: `crates/daw-ui/src/studio_browser.rs`, `studio_piano.rs`, `studio_session.rs`
 - Modified: `crates/daw-ui/src/studio.rs`, `studio_views.rs`, `crates/daw-engine/src/graph.rs`
+
+[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

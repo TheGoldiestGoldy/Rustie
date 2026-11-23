@@ -51,7 +51,10 @@ impl Studio {
         }
         if let Some(instrument) = self.project.tracks.iter()
             .filter_map(|track| track.instrument.as_ref())
-            .find(|instrument| !self.soundfonts.contains_key(&instrument.bank))
+            .find(|instrument| {
+                instrument.bank != LNF1_INSTRUMENT_BANK
+                    && !self.soundfonts.contains_key(&instrument.bank)
+            })
         {
             self.error = Some(format!("Arrangement export needs the assigned SoundFont bank: {}", instrument.bank));
             return;
@@ -277,3 +280,5 @@ mod export_tests {
         let _ = fs::remove_file(file);
     }
 }
+
+[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

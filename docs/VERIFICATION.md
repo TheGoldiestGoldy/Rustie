@@ -10,6 +10,12 @@ Different checks answer different questions. Test counts belong to a source snap
 | 22 November seek working state | Source changes and partial agent test progress; additional regressions in the snapshot | Final agent completion, native mouse/audio acceptance and measured repeated-seek latency |
 | 21 November Autonatural Lab | 90 tests; synthetic render/import at two offsets; unchanged source bytes | Real-vocal naturalness or live pitch correction |
 
+## 23 November instrument draft branch
+
+The isolated beta/sf16-lnf1-foundation branch passed **173 workspace tests**: 30 daw-core, 52 daw-engine, 11 realtime-guard integration tests, 6 plug-in-host and 74 UI tests. Two opt-in PulseAudio tests were ignored. cargo fmt --all -- --check, strict workspace Clippy, cargo build --release -p daw-ui --locked and git diff --check passed on the sanitized branch.
+
+This verifies compilation and automated tests, not physical audio, hardware MIDI, LNF-1 manual GUI interaction, sample parity or general host automation. No speaker/headphone acceptance was performed. The two current screenshot files whose footer showed a local QA path have had that footer removed. This PR does not rewrite public history.
+
 ## Independent publication snapshot checks
 
 The combined snapshot passed **164 tests**, including **nine realtime allocation checks**, with **two opt-in PulseAudio tests ignored**. Formatting and strict Clippy also passed. Build and publication results are recorded in the [publication report](agent-reports/2026-11-22-github-publication-report.md). These run on the isolated combined source identified by [file hashes](source-snapshot-sha256.json), preserving the active integration worktree.
@@ -28,3 +34,5 @@ cargo build --locked --release -p daw-ui -p daw-plugin-host
 Opt-in audio tests require their documented private fixtures. Do not reinterpret ignored cases as passes. A silent probe still opens an audio device; use a safe test environment.
 
 Detailed sources: [baseline report](agent-reports/2026-11-21-beta-integration-followup-report.md), [mic report](agent-reports/2026-11-22-mic-workflow.md), [routing/level analysis](agent-reports/2026-11-22-mic-routing-and-level.md), [release gates](BETA1_RELEASE_DECISION.md), [Lab report](research/AUTONATURAL_LAB_PORT_REPORT.md).
+
+[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

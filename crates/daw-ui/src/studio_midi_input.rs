@@ -11,8 +11,8 @@ enum MidiInputEvent {
     AllNotesOff { channel: u8 },
     Sustain { channel: u8, value: u8 },
     PitchBend { channel: u8, value: u16 },
-    ControlChange { controller: u8, value: u8 },
-    ProgramChange { program: u8 },
+    ControlChange { channel: u8, controller: u8, value: u8 },
+    ProgramChange { channel: u8, program: u8 },
 }
 
 fn decode_midi_message(bytes: &[u8]) -> Option<MidiInputEvent> {
@@ -37,8 +37,8 @@ fn decode_midi_message(bytes: &[u8]) -> Option<MidiInputEvent> {
         0xb0 if bytes.len() >= 3 && note == 64 && bytes[2] < 128 =>
             Some(MidiInputEvent::Sustain { channel, value: bytes[2] }),
         0xb0 if bytes.len() >= 3 && note < 128 && bytes[2] < 128 =>
-            Some(MidiInputEvent::ControlChange { controller: note, value: bytes[2] }),
-        0xc0 if note < 128 => Some(MidiInputEvent::ProgramChange { program: note }),
+            Some(MidiInputEvent::ControlChange { channel, controller: note, value: bytes[2] }),
+        0xc0 if note < 128 => Some(MidiInputEvent::ProgramChange { channel, program: note }),
         0xe0 if bytes.len() >= 3 && note < 128 && bytes[2] < 128 =>
             Some(MidiInputEvent::PitchBend {
                 channel,
@@ -242,21 +242,21 @@ impl Studio {
                         self.midi_send(node, channel, LiveMidiMessage::PitchBend(value));
                     }
                 }
-                MidiInputEvent::ControlChange { controller, value } => {
+                MidiInputEvent::ControlChange { channel, controller, value } => {
                     if let (Some(node), Some(driver)) =
                         (self.midi_selected_node(), self.driver.as_mut())
                     {
                         let _ = driver.controller().immediate(EngineCommand::ControlChange {
-                            node, controller, value,
+                            node, channel, controller, value,
                         });
                     }
                 }
-                MidiInputEvent::ProgramChange { program } => {
+                MidiInputEvent::ProgramChange { channel, program } => {
                     if let (Some(node), Some(driver)) =
                         (self.midi_selected_node(), self.driver.as_mut())
                     {
                         let _ = driver.controller().immediate(EngineCommand::ProgramChange {
-                            node, program,
+                            node, channel, program,
                         });
                     }
                 }
@@ -335,9 +335,11 @@ mod midi_input_tests {
     #[test]
     fn decodes_builtin_instrument_controls() {
         assert_eq!(decode_midi_message(&[0xb2, 1, 42]), Some(
-            MidiInputEvent::ControlChange { controller: 1, value: 42 }));
+            MidiInputEvent::ControlChange { channel: 2, controller: 1, value: 42 }));
         assert_eq!(decode_midi_message(&[0xc3, 5]), Some(
-            MidiInputEvent::ProgramChange { program: 5 }));
+            MidiInputEvent::ProgramChange { channel: 3, program: 5 }));
         assert_eq!(decode_midi_message(&[0xc3, 128]), None);
     }
 }
+
+[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

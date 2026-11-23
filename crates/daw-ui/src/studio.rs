@@ -14,10 +14,11 @@ use daw_core::{
     resolve_preset,
 };
 use daw_engine::{
-    AudioDriver, DriverConfig, EngineCommand, GraphBuilder, NodeSpec, SoundFontBank,
-    SoundFontHandle, SoundFontInstrument, SoundFontTone, Source, StereoFrame,
-    build_synth_with_tone, decode_to_source, driver::Backend, effects::EffectRack,
-    live_plugin::LivePluginControl, load_sound_font, monitor::RecordingMonitor,
+    AudioDriver, DriverConfig, EngineCommand, GraphBuilder, LNF1_INSTRUMENT_BANK, Lnf1Instrument,
+    Lnf1Page, Lnf1ParamHandle, Lnf1ParamStore, NodeSpec, SoundFontBank, SoundFontHandle,
+    SoundFontInstrument, SoundFontTone, Source, StereoFrame, build_synth_with_tone,
+    decode_to_source, driver::Backend, effects::EffectRack, live_plugin::LivePluginControl,
+    load_sound_font, monitor::RecordingMonitor,
 };
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
@@ -135,6 +136,9 @@ pub struct Studio {
     soundfont_ready: bool,
     keyboard_octave: i8,
     instrument_tones: HashMap<u64, SoundFontTone>,
+    /// Lock-free UI-to-audio parameter bridges keyed by track ID.
+    lnf1_handles: HashMap<u64, Lnf1ParamHandle>,
+    lnf1_page: Lnf1Page,
     keyboard_mouse_note: Option<(u32, u8)>,
     keyboard_held: HashMap<egui::Key, (u32, u8)>,
     sample_rate: u32,
@@ -489,6 +493,8 @@ impl Studio {
             soundfont_ready: false,
             keyboard_octave: 0,
             instrument_tones: HashMap::new(),
+            lnf1_handles: HashMap::new(),
+            lnf1_page: Lnf1Page::Tune,
             keyboard_mouse_note: None,
             keyboard_held: HashMap::new(),
             sample_rate,
@@ -999,6 +1005,29 @@ impl Studio {
                         // embedded at graph build time; preset changes swap in
                         // through the lock-free handle without a rebuild.
                         if !uses_live_instrument
+                            && track
+                                .instrument
+                                .as_ref()
+                                .is_some_and(|instrument| instrument.bank == LNF1_INSTRUMENT_BANK)
+                        {
+                            let params = track
+                                .instrument
+                                .as_ref()
+                                .and_then(|instrument| instrument.lnf1_params)
+                                .map(daw_engine::Lnf1Params::from_values)
+                                .unwrap_or_default();
+                            let handle = self
+                                .lnf1_handles
+                                .entry(track.id)
+                                .or_insert_with(|| Lnf1ParamStore::new(params))
+                                .clone();
+                            handle.set_params(params);
+                            let instrument =
+                                Lnf1Instrument::with_param_store(self.sample_rate, handle);
+                            spec.source = Source::SoundFont {
+                                instrument: Box::new(instrument),
+                            };
+                        } else if !uses_live_instrument
                             && let Some((bank, preset)) = self.track_instrument(track)
                         {
                             let tone = self.instrument_tone(track.id);
@@ -2253,6 +2282,7 @@ include!("studio_plugin_render.rs");
 include!("studio_live_plugins.rs");
 include!("studio_export.rs");
 include!("studio_instruments.rs");
+include!("studio_lnf1.rs");
 
 #[cfg(test)]
 mod sample_rate_selection_tests {
@@ -2313,3 +2343,5 @@ mod sample_rate_selection_tests {
         );
     }
 }
+
+[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

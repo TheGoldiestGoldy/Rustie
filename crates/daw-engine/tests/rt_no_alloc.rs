@@ -2,7 +2,8 @@
 //! Tests the engine callback body, not the implementation inside ALSA/JACK/CPAL.
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use daw_engine::{
-    EngineCommand, GraphBuilder, NodeSpec, ScheduledCommand, Source, StereoFrame, create_engine,
+    EngineCommand, GraphBuilder, Instrument, Lnf1Instrument, Lnf1ParamId, Lnf1ParamStore,
+    Lnf1Params, NodeSpec, ScheduledCommand, Source, StereoFrame, create_engine,
 };
 
 #[global_allocator]
@@ -178,6 +179,29 @@ fn built_in_eq_and_reverb_process_in_audio_callback_without_allocations() {
         }
     });
     assert!(output.iter().any(|sample| sample.abs() > 0.001));
+}
+
+#[test]
+fn lnf1_render_and_atomic_parameter_snapshot_are_allocation_free() {
+    let handle = Lnf1ParamStore::new(Lnf1Params::default());
+    let mut piano = Lnf1Instrument::with_param_store(48_000, handle.clone());
+    piano.note_on(60, 110);
+    let mut params = Lnf1Params::default();
+    params.set(Lnf1ParamId::ReverbMix, 42.0);
+    params.set(Lnf1ParamId::OutputLevel, -6.0);
+    handle.set_params(params);
+    let mut left = [0.0_f32; 128];
+    let mut right = [0.0_f32; 128];
+    assert_no_alloc(|| {
+        for _ in 0..100 {
+            piano.render(&mut left, &mut right);
+        }
+    });
+    assert!(
+        left.iter()
+            .chain(right.iter())
+            .any(|sample| sample.abs() > 0.0001)
+    );
 }
 
 #[test]
@@ -392,6 +416,36 @@ fn soundfont_swaps_and_plays_a_new_note_without_realtime_heap_activity() {
 }
 
 #[test]
+fn sf16_multitimbral_render_and_channel_midi_are_allocation_free() {
+    use daw_engine::{Sf16Instrument, Sf16Settings, live_plugin::LiveMidiMessage};
+    use std::sync::Arc;
+
+    let bytes = include_bytes!("fixtures/qa-two-programs.sf2");
+    let bank = Arc::new(rustysynth::SoundFont::new(&mut bytes.as_slice()).unwrap());
+    let instrument = Sf16Instrument::new(&bank, 48_000, Sf16Settings::default()).unwrap();
+    let mut node = NodeSpec::midi(1);
+    node.source = Source::SoundFont {
+        instrument: Box::new(instrument),
+    };
+    let mut builder = GraphBuilder::new(48_000);
+    builder.add_node(node).add_node(NodeSpec::master(2));
+    builder.route(1, 2, 1.0);
+    let (mut controller, mut engine) = create_engine(builder.build().unwrap());
+    controller.immediate(EngineCommand::Play).unwrap();
+    controller
+        .immediate(EngineCommand::LiveMidi {
+            node: 1,
+            channel: 4,
+            message: LiveMidiMessage::NoteOn(69, 110),
+        })
+        .unwrap();
+
+    let mut output = [0.0_f32; 1024];
+    assert_no_alloc(|| engine.process_interleaved(&mut output, 2));
+    assert!(output.iter().any(|sample| sample.abs() > 0.01));
+}
+
+#[test]
 fn arrangement_seek_barriers_and_rebased_midi_are_allocation_free() {
     let mut builder = GraphBuilder::new(48_000);
     builder
@@ -430,3 +484,5 @@ fn arrangement_seek_barriers_and_rebased_midi_are_allocation_free() {
         assert_no_alloc(|| engine.process_interleaved(&mut output, 2));
     }
 }
+
+[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

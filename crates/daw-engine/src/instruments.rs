@@ -36,6 +36,399 @@ pub trait Instrument: Send + fmt::Debug {
     fn program_change(&mut self, program: u8);
     fn all_notes_off(&mut self);
     fn reset(&mut self);
+
+    /// Deliver a complete channel MIDI message. The default implementation
+    /// keeps the original single-part instrument contract: callers that do
+    /// not care about channel routing continue to receive the same messages
+    /// as before. Multitimbral instruments override this method.
+    fn midi_message(&mut self, _channel: u8, command: u8, data1: u8, data2: u8) {
+        match command & 0xF0 {
+            0x80 => self.note_off(data1),
+            0x90 if data2 == 0 => self.note_off(data1),
+            0x90 => self.note_on(data1, data2),
+            0xB0 => self.control_change(data1, data2),
+            0xC0 => self.program_change(data1),
+            0xE0 => self.pitch_bend(u16::from(data1) | (u16::from(data2) << 7)),
+            _ => {}
+        }
+    }
+}
+
+/// Number of independently addressable parts in the sf-16 engine.
+pub const SF16_PARTS: usize = 16;
+
+/// MIDI input mapping for a sf-16 part. A part normally listens to its
+/// corresponding MIDI channel; `Omni` is useful for layered parts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sf16Listen {
+    Channel(u8),
+    Omni,
+    Off,
+}
+
+/// UI-readable state mirrored from rustysynth's write-only channel API.
+/// Values with a fine controller use the standard 14-bit MIDI representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sf16PartState {
+    pub bank: u8,
+    pub program: u8,
+    pub volume: u16,
+    pub pan: u16,
+    pub expression: u16,
+    pub modulation: u16,
+    pub reverb_send: u8,
+    pub chorus_send: u8,
+    pub bend_range_st: u8,
+    pub fine_tune_ct: i8,
+    pub coarse_tune_st: i8,
+    pub hold: bool,
+    pub mute: bool,
+    pub solo: bool,
+    pub listen: Sf16Listen,
+}
+
+impl Sf16PartState {
+    fn defaults(part: usize) -> Self {
+        Self {
+            bank: 0,
+            program: 0,
+            volume: 100 << 7,
+            pan: 64 << 7,
+            expression: 127 << 7,
+            modulation: 0,
+            reverb_send: 40,
+            chorus_send: 0,
+            bend_range_st: 2,
+            fine_tune_ct: 0,
+            coarse_tune_st: 0,
+            hold: false,
+            mute: false,
+            solo: false,
+            listen: Sf16Listen::Channel(part as u8),
+        }
+    }
+}
+
+/// Construction-only settings. Changing one requires rebuilding the synth on
+/// a non-realtime thread and then replacing the instrument at a safe boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sf16Settings {
+    pub block_size: usize,
+    pub maximum_polyphony: usize,
+    pub enable_reverb_and_chorus: bool,
+}
+
+impl Default for Sf16Settings {
+    fn default() -> Self {
+        Self {
+            block_size: 32,
+            maximum_polyphony: 128,
+            enable_reverb_and_chorus: true,
+        }
+    }
+}
+
+/// Lock-free, audio-thread-owned 16-part SoundFont engine. It has one
+/// rustysynth instance (which already contains 16 MIDI channels), a shadow
+/// state for the UI, and no heap allocation or locking in `render`/MIDI paths.
+pub struct Sf16Instrument {
+    synth: rustysynth::Synthesizer,
+    parts: [Sf16PartState; SF16_PARTS],
+    held: [[bool; 128]; SF16_PARTS],
+    held_count: [u8; SF16_PARTS],
+    rpn: [(u8, u8); SF16_PARTS],
+}
+
+impl fmt::Debug for Sf16Instrument {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sf16Instrument")
+            .field("parts", &self.parts)
+            .field("held_count", &self.held_count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Sf16Instrument {
+    /// Construct sf-16 from an already-loaded SoundFont. Loading/parsing the
+    /// file remains explicitly off the realtime path via `load_sound_font`.
+    pub fn new(
+        sound_font: &SoundFontBank,
+        sample_rate: u32,
+        settings: Sf16Settings,
+    ) -> Result<Self, String> {
+        let mut synth_settings = rustysynth::SynthesizerSettings::new(sample_rate as i32);
+        synth_settings.block_size = settings.block_size;
+        synth_settings.maximum_polyphony = settings.maximum_polyphony;
+        synth_settings.enable_reverb_and_chorus = settings.enable_reverb_and_chorus;
+        let synth = rustysynth::Synthesizer::new(sound_font, &synth_settings)
+            .map_err(|error| format!("initialize sf-16 synthesizer: {error}"))?;
+        Ok(Self {
+            synth,
+            parts: std::array::from_fn(Sf16PartState::defaults),
+            held: [[false; 128]; SF16_PARTS],
+            held_count: [0; SF16_PARTS],
+            rpn: [(127, 127); SF16_PARTS],
+        })
+    }
+
+    pub fn part(&self, part: usize) -> Option<Sf16PartState> {
+        self.parts.get(part).copied()
+    }
+
+    pub fn parts(&self) -> &[Sf16PartState; SF16_PARTS] {
+        &self.parts
+    }
+
+    pub fn held_count(&self, part: usize) -> Option<u8> {
+        self.held_count.get(part).copied()
+    }
+
+    pub fn set_master_volume(&mut self, volume: f32) {
+        self.synth.set_master_volume(volume.clamp(0.0, 1.0));
+    }
+
+    pub fn master_volume(&self) -> f32 {
+        self.synth.get_master_volume()
+    }
+
+    pub fn set_listen(&mut self, part: usize, listen: Sf16Listen) {
+        if let Some(state) = self.parts.get_mut(part) {
+            *state = Sf16PartState { listen, ..*state };
+        }
+    }
+
+    pub fn set_program(&mut self, part: usize, bank: u8, program: u8) {
+        let Some(state) = self.parts.get_mut(part) else {
+            return;
+        };
+        state.bank = bank.min(127);
+        state.program = program.min(127);
+        let (bank, program) = (state.bank, state.program);
+        self.send(part, 0xB0, 0, bank);
+        self.send(part, 0xC0, program, 0);
+    }
+
+    pub fn set_mute_solo(&mut self, part: usize, mute: bool, solo: bool) {
+        let Some(state) = self.parts.get_mut(part) else {
+            return;
+        };
+        state.mute = mute;
+        state.solo = solo;
+        self.refresh_effective_volumes();
+    }
+
+    /// Process an ordinary channel MIDI message. Routing is resolved against
+    /// `listen` first; a message can deliberately reach several Omni parts.
+    pub fn process_midi_message(&mut self, channel: u8, command: u8, data1: u8, data2: u8) {
+        if channel as usize >= SF16_PARTS {
+            return;
+        }
+        for part in 0..SF16_PARTS {
+            if self.listens_to(part, channel) {
+                self.apply_to_part(part, command & 0xF0, data1 & 0x7F, data2 & 0x7F);
+            }
+        }
+    }
+
+    pub fn panic(&mut self) {
+        for part in 0..SF16_PARTS {
+            self.send(part, 0xB0, 120, 0);
+            self.held[part].fill(false);
+            self.held_count[part] = 0;
+        }
+    }
+
+    pub fn reset_part(&mut self, part: usize) {
+        if part >= SF16_PARTS {
+            return;
+        }
+        self.synth.reset_all_controllers_channel(part as i32);
+        self.parts[part] = Sf16PartState::defaults(part);
+        self.held[part].fill(false);
+        self.held_count[part] = 0;
+        self.rpn[part] = (127, 127);
+        self.send(part, 0xB0, 0, 0);
+        self.send(part, 0xC0, 0, 0);
+        self.apply_part_state(part);
+    }
+
+    fn listens_to(&self, part: usize, channel: u8) -> bool {
+        matches!(self.parts[part].listen, Sf16Listen::Omni)
+            || matches!(self.parts[part].listen, Sf16Listen::Channel(value) if value == channel)
+    }
+
+    fn send(&mut self, part: usize, command: u8, data1: u8, data2: u8) {
+        self.synth.process_midi_message(
+            part as i32,
+            i32::from(command),
+            i32::from(data1),
+            i32::from(data2),
+        );
+    }
+
+    fn apply_to_part(&mut self, part: usize, command: u8, data1: u8, data2: u8) {
+        match command {
+            0x80 => self.set_held(part, data1, false),
+            0x90 if data2 == 0 => self.set_held(part, data1, false),
+            0x90 => self.set_held(part, data1, true),
+            0xB0 => self.update_controller(part, data1, data2),
+            0xC0 => self.parts[part].program = data1,
+            _ => {}
+        }
+        // Mute and solo are sf-16 policy rather than native MIDI controls.
+        // Preserve the underlying CC7 value but never forward a bypassing CC7.
+        if !(command == 0xB0 && (data1 == 7 || data1 == 39)) {
+            self.send(part, command, data1, data2);
+        }
+        if command == 0xB0 && (data1 == 7 || data1 == 39) {
+            self.apply_effective_volume(part);
+        }
+    }
+
+    fn update_controller(&mut self, part: usize, controller: u8, value: u8) {
+        let state = &mut self.parts[part];
+        match controller {
+            0 => state.bank = value,
+            1 => state.modulation = (state.modulation & 0x7F) | (u16::from(value) << 7),
+            33 => state.modulation = (state.modulation & !0x7F) | u16::from(value),
+            7 => state.volume = (state.volume & 0x7F) | (u16::from(value) << 7),
+            39 => state.volume = (state.volume & !0x7F) | u16::from(value),
+            10 => state.pan = (state.pan & 0x7F) | (u16::from(value) << 7),
+            42 => state.pan = (state.pan & !0x7F) | u16::from(value),
+            11 => state.expression = (state.expression & 0x7F) | (u16::from(value) << 7),
+            43 => state.expression = (state.expression & !0x7F) | u16::from(value),
+            64 => state.hold = value >= 64,
+            91 => state.reverb_send = value,
+            93 => state.chorus_send = value,
+            101 => self.rpn[part].0 = value,
+            100 => self.rpn[part].1 = value,
+            6 => match self.rpn[part] {
+                (0, 0) => state.bend_range_st = value.min(24),
+                (0, 1) => {
+                    state.fine_tune_ct =
+                        (((i16::from(value) << 7) - 8192) / 82).clamp(-100, 100) as i8
+                }
+                (0, 2) => state.coarse_tune_st = (i16::from(value) - 64).clamp(-24, 24) as i8,
+                _ => {}
+            },
+            38 if self.rpn[part] == (0, 1) => {
+                let coarse = i16::from(state.fine_tune_ct) * 82 + 8192;
+                state.fine_tune_ct =
+                    ((coarse + i16::from(value) - 8192) / 82).clamp(-100, 100) as i8;
+            }
+            120 | 123 => {
+                self.held[part].fill(false);
+                self.held_count[part] = 0;
+            }
+            121 => {
+                let mute = state.mute;
+                let solo = state.solo;
+                *state = Sf16PartState {
+                    mute,
+                    solo,
+                    ..Sf16PartState::defaults(part)
+                };
+                self.rpn[part] = (127, 127);
+            }
+            _ => {}
+        }
+    }
+
+    fn set_held(&mut self, part: usize, note: u8, held: bool) {
+        let slot = &mut self.held[part][note as usize];
+        if *slot == held {
+            return;
+        }
+        *slot = held;
+        if held {
+            self.held_count[part] = self.held_count[part].saturating_add(1);
+        } else {
+            self.held_count[part] = self.held_count[part].saturating_sub(1);
+        }
+    }
+
+    fn any_solo(&self) -> bool {
+        self.parts.iter().any(|part| part.solo)
+    }
+
+    fn effective_volume(&self, part: usize) -> u16 {
+        let state = self.parts[part];
+        if state.mute || (self.any_solo() && !state.solo) {
+            0
+        } else {
+            state.volume
+        }
+    }
+
+    fn apply_effective_volume(&mut self, part: usize) {
+        let volume = self.effective_volume(part);
+        self.send(part, 0xB0, 7, (volume >> 7) as u8);
+        self.send(part, 0xB0, 39, (volume & 0x7F) as u8);
+    }
+
+    fn refresh_effective_volumes(&mut self) {
+        for part in 0..SF16_PARTS {
+            self.apply_effective_volume(part);
+        }
+    }
+
+    fn apply_part_state(&mut self, part: usize) {
+        let state = self.parts[part];
+        self.send(part, 0xB0, 1, (state.modulation >> 7) as u8);
+        self.send(part, 0xB0, 33, (state.modulation & 0x7F) as u8);
+        self.send(part, 0xB0, 10, (state.pan >> 7) as u8);
+        self.send(part, 0xB0, 42, (state.pan & 0x7F) as u8);
+        self.send(part, 0xB0, 11, (state.expression >> 7) as u8);
+        self.send(part, 0xB0, 43, (state.expression & 0x7F) as u8);
+        self.send(part, 0xB0, 64, if state.hold { 127 } else { 0 });
+        self.send(part, 0xB0, 91, state.reverb_send);
+        self.send(part, 0xB0, 93, state.chorus_send);
+        self.apply_effective_volume(part);
+    }
+}
+
+impl Instrument for Sf16Instrument {
+    fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
+        self.synth.render(left, right);
+    }
+
+    fn note_on(&mut self, note: u8, velocity: u8) {
+        self.process_midi_message(0, 0x90, note, velocity);
+    }
+
+    fn note_off(&mut self, note: u8) {
+        self.process_midi_message(0, 0x80, note, 0);
+    }
+
+    fn pitch_bend(&mut self, value: u16) {
+        self.process_midi_message(0, 0xE0, value as u8 & 0x7F, (value >> 7) as u8 & 0x7F);
+    }
+
+    fn control_change(&mut self, controller: u8, value: u8) {
+        self.process_midi_message(0, 0xB0, controller, value);
+    }
+
+    fn program_change(&mut self, program: u8) {
+        self.process_midi_message(0, 0xC0, program, 0);
+    }
+
+    fn all_notes_off(&mut self) {
+        self.panic();
+    }
+
+    fn reset(&mut self) {
+        self.synth.reset();
+        for part in 0..SF16_PARTS {
+            self.parts[part] = Sf16PartState::defaults(part);
+            self.held[part].fill(false);
+            self.held_count[part] = 0;
+            self.rpn[part] = (127, 127);
+        }
+    }
+
+    fn midi_message(&mut self, channel: u8, command: u8, data1: u8, data2: u8) {
+        self.process_midi_message(channel, command, data1, data2);
+    }
 }
 
 /// A fully initialized replacement prepared off the render thread.
@@ -362,4 +755,56 @@ mod tests {
         let missing = Path::new("/nonexistent/rusty-no-such-bank.sf2");
         assert!(load_sound_font(missing).is_err());
     }
+
+    fn sf16_fixture() -> SoundFontBank {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qa-two-programs.sf2");
+        load_sound_font(&path).expect("generated two-program SoundFont fixture")
+    }
+
+    #[test]
+    fn sf16_routes_channels_and_mirrors_controller_state() {
+        let bank = sf16_fixture();
+        let mut sf16 = Sf16Instrument::new(&bank, 48_000, Sf16Settings::default()).unwrap();
+
+        sf16.process_midi_message(3, 0x90, 60, 101);
+        assert_eq!(sf16.held_count(3), Some(1));
+        assert_eq!(sf16.held_count(2), Some(0));
+
+        sf16.process_midi_message(3, 0xB0, 7, 88);
+        sf16.process_midi_message(3, 0xB0, 39, 12);
+        sf16.process_midi_message(3, 0xB0, 10, 17);
+        sf16.process_midi_message(3, 0xC0, 9, 0);
+        let state = sf16.part(3).unwrap();
+        assert_eq!(state.volume, (88 << 7) | 12);
+        assert_eq!(state.pan, 17 << 7);
+        assert_eq!(state.program, 9);
+
+        sf16.process_midi_message(3, 0x80, 60, 0);
+        assert_eq!(sf16.held_count(3), Some(0));
+    }
+
+    #[test]
+    fn sf16_supports_omni_layers_mute_solo_and_rpn_shadowing() {
+        let bank = sf16_fixture();
+        let mut sf16 = Sf16Instrument::new(&bank, 48_000, Sf16Settings::default()).unwrap();
+        sf16.set_listen(0, Sf16Listen::Omni);
+        sf16.process_midi_message(7, 0x90, 67, 110);
+        assert_eq!(sf16.held_count(0), Some(1));
+        assert_eq!(sf16.held_count(7), Some(1));
+
+        sf16.set_mute_solo(0, true, false);
+        sf16.set_mute_solo(7, false, true);
+        assert!(sf16.part(0).unwrap().mute);
+        assert!(sf16.part(7).unwrap().solo);
+
+        // RPN 0,0: pitch-bend range; standard null RPN ends the transaction.
+        sf16.process_midi_message(7, 0xB0, 101, 0);
+        sf16.process_midi_message(7, 0xB0, 100, 0);
+        sf16.process_midi_message(7, 0xB0, 6, 12);
+        sf16.process_midi_message(7, 0xB0, 101, 127);
+        sf16.process_midi_message(7, 0xB0, 100, 127);
+        assert_eq!(sf16.part(7).unwrap().bend_range_st, 12);
+    }
 }
+
+[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

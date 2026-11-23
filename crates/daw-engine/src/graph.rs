@@ -359,21 +359,27 @@ impl Source {
         }
     }
 
-    pub(crate) fn pitch_bend(&mut self, value: u16) {
+    /// Channel-aware MIDI entry point. The existing single-part SoundFont
+    /// source deliberately ignores the channel via `Instrument`'s default
+    /// implementation, while sf-16 uses it to route each message to a part.
+    pub(crate) fn midi_message(
+        &mut self,
+        channel: u8,
+        command: u8,
+        data1: u8,
+        data2: u8,
+        sample_rate: u32,
+    ) {
         if let Self::SoundFont { instrument } = self {
-            instrument.pitch_bend(value);
+            instrument.midi_message(channel, command, data1, data2);
+            return;
         }
-    }
-
-    pub(crate) fn control_change(&mut self, controller: u8, value: u8) {
-        if let Self::SoundFont { instrument } = self {
-            instrument.control_change(controller, value);
-        }
-    }
-
-    pub(crate) fn program_change(&mut self, program: u8) {
-        if let Self::SoundFont { instrument } = self {
-            instrument.program_change(program);
+        match command & 0xF0 {
+            0x80 => self.note_off(data1),
+            0x90 if data2 == 0 => self.note_off(data1),
+            0x90 => self.note_on(data1, data2, sample_rate),
+            0xB0 if data1 == 120 || data1 == 123 => self.all_notes_off(),
+            _ => {}
         }
     }
 }
@@ -611,35 +617,53 @@ impl AudioGraph {
         {
             match message {
                 LiveMidiMessage::NoteOn(note, velocity) => {
-                    node.source.note_on(note, velocity, self.sample_rate);
+                    node.source
+                        .midi_message(channel, 0x90, note, velocity, self.sample_rate);
                 }
-                LiveMidiMessage::NoteOff(note) => node.source.note_off(note),
-                LiveMidiMessage::Sustain(value) => node.source.control_change(64, value),
-                LiveMidiMessage::PitchBend(value) => node.source.pitch_bend(value),
-                LiveMidiMessage::ChannelPanic => node.source.control_change(64, 0),
+                LiveMidiMessage::NoteOff(note) => {
+                    node.source
+                        .midi_message(channel, 0x80, note, 0, self.sample_rate)
+                }
+                LiveMidiMessage::Sustain(value) => {
+                    node.source
+                        .midi_message(channel, 0xB0, 64, value, self.sample_rate)
+                }
+                LiveMidiMessage::PitchBend(value) => node.source.midi_message(
+                    channel,
+                    0xE0,
+                    (value & 0x7F) as u8,
+                    ((value >> 7) & 0x7F) as u8,
+                    self.sample_rate,
+                ),
+                LiveMidiMessage::ChannelPanic => {
+                    node.source
+                        .midi_message(channel, 0xB0, 120, 0, self.sample_rate)
+                }
                 LiveMidiMessage::Panic => node.source.all_notes_off(),
             }
             node.effects.live_midi(channel, message);
         }
     }
 
-    pub fn control_change(&mut self, id: u32, controller: u8, value: u8) {
+    pub fn control_change(&mut self, id: u32, channel: u8, controller: u8, value: u8) {
         if let Some(node) = self
             .nodes
             .iter_mut()
             .find(|n| n.id == id && n.kind == NodeKind::MidiTrack)
         {
-            node.source.control_change(controller, value);
+            node.source
+                .midi_message(channel, 0xB0, controller, value, self.sample_rate);
         }
     }
 
-    pub fn program_change(&mut self, id: u32, program: u8) {
+    pub fn program_change(&mut self, id: u32, channel: u8, program: u8) {
         if let Some(node) = self
             .nodes
             .iter_mut()
             .find(|n| n.id == id && n.kind == NodeKind::MidiTrack)
         {
-            node.source.program_change(program);
+            node.source
+                .midi_message(channel, 0xC0, program, 0, self.sample_rate);
         }
     }
 
@@ -1313,3 +1337,5 @@ mod soundfont_graph_routing_tests {
         assert_eq!(graph.render_frame(2), StereoFrame::ZERO);
     }
 }
+
+[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]
