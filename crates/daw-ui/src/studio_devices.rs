@@ -777,5 +777,3 @@ fn hardware_panel_and_playback_survive_repeated_input_discovery() {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

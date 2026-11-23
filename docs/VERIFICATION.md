@@ -34,5 +34,3 @@ cargo build --locked --release -p daw-ui -p daw-plugin-host
 Opt-in audio tests require their documented private fixtures. Do not reinterpret ignored cases as passes. A silent probe still opens an audio device; use a safe test environment.
 
 Detailed sources: [baseline report](agent-reports/2026-11-21-beta-integration-followup-report.md), [mic report](agent-reports/2026-11-22-mic-workflow.md), [routing/level analysis](agent-reports/2026-11-22-mic-routing-and-level.md), [release gates](BETA1_RELEASE_DECISION.md), [Lab report](research/AUTONATURAL_LAB_PORT_REPORT.md).
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

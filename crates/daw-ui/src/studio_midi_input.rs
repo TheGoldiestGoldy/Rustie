@@ -341,5 +341,3 @@ mod midi_input_tests {
         assert_eq!(decode_midi_message(&[0xc3, 128]), None);
     }
 }
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

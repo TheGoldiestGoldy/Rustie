@@ -36,5 +36,3 @@ The exact source-file hashes are in [source snapshot manifest](source-snapshot-s
 ## Still open
 
 Output startup reliability, owner headphone clarity, reference-transient hardware alignment, measured analogue latency and backend XRUN/deadline evidence; complete live-insert print/export workflow; broader plug-in/device and long-session recovery coverage; distribution and contributor notices. [Release decision](BETA1_RELEASE_DECISION.md) · [Limitations](KNOWN_LIMITATIONS.md) · [Roadmap](ROADMAP.md)
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

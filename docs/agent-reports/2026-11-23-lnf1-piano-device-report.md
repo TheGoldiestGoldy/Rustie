@@ -59,5 +59,3 @@ The test results do not establish audible output, sample parity, hardware timing
 ## 7. Next-agent handoff
 
 Read `docs/LNF1.md` and this report before extending the device. Preserve the concurrent dirty SoundFont work in `instruments.rs`, `graph.rs`, `engine.rs`, `studio_instruments.rs`, `studio_midi_input.rs`, and `docs/agent-reports/README.md`. Treat sample-source licensing as a hard boundary: do not import mda/Lost N' Found code or data without review.
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

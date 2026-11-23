@@ -39,5 +39,3 @@ Each report applies to its own source snapshot. Local QA artifacts are described
 - [2026-11-17-agent-handoff-instructions](2026-11-17-agent-handoff-instructions.md)
 
 - [2026-11-22 GitHub publication report](2026-11-22-github-publication-report.md)
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

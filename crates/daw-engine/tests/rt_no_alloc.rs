@@ -484,5 +484,3 @@ fn arrangement_seek_barriers_and_rebased_midi_are_allocation_free() {
         assert_no_alloc(|| engine.process_interleaved(&mut output, 2));
     }
 }
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

@@ -33,5 +33,3 @@ The existing Devices > Instrument editor remains the single-track rack until a
 separate project/UI model for a 16-part sf-16 instance is added. No production
 SoundFont was added, no installation was performed, and speaker output was not
 tested.
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

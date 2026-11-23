@@ -318,5 +318,3 @@ mod tests {
         assert!(soundfont.get("lnf1_params").is_none());
     }
 }
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

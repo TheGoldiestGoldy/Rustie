@@ -76,5 +76,3 @@ Round 2 verification: `cargo test --workspace` 43 passed; strict Clippy, format,
 ## Relevant source files
 - New: `crates/daw-ui/src/studio_browser.rs`, `studio_piano.rs`, `studio_session.rs`
 - Modified: `crates/daw-ui/src/studio.rs`, `studio_views.rs`, `crates/daw-engine/src/graph.rs`
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

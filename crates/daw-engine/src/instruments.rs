@@ -806,5 +806,3 @@ mod tests {
         assert_eq!(sf16.part(7).unwrap().bend_range_st, 12);
     }
 }
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

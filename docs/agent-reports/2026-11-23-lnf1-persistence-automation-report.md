@@ -51,5 +51,3 @@ No native screenshot was captured. The release executable was built in the prece
 ## 7. Next-agent handoff
 
 Read `docs/LNF1.md` and both LNF-1 reports. Preserve the atomic store invariant: UI writes atomics; the render thread only snapshots them. Do not add sample data or reference-source code without a licensing decision.
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

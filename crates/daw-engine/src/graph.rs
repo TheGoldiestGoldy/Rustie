@@ -1337,5 +1337,3 @@ mod soundfont_graph_routing_tests {
         assert_eq!(graph.render_frame(2), StereoFrame::ZERO);
     }
 }
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

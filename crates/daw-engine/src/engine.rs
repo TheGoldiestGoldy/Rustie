@@ -905,5 +905,3 @@ mod midi_monitor_regression {
         assert!(engine.project_frame() > 0);
     }
 }
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

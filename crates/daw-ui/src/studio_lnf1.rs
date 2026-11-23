@@ -458,5 +458,3 @@ fn draw_lnf1_empty_encoder(ui: &mut egui::Ui, _slot: usize, colour: Color32) {
             .color(LNF_DIM),
     );
 }
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

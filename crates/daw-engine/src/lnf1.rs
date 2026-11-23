@@ -679,5 +679,3 @@ mod tests {
         assert_eq!(piano.params().get(Lnf1ParamId::OutputLevel), -3.0);
     }
 }
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]

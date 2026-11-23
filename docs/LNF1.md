@@ -33,5 +33,3 @@ MIDI / on-screen keyboard ──────────────────
 1. Add parameter-edit undo/redo plus explicit automation gestures and sample-accurate smoothing for every continuous control.
 2. Add telemetry for voice dots, level meters and LFO phase, then test the panel with native pointer interaction and screenshots.
 3. Only after licensing review, decide whether to build a separately licensed sample-data pipeline; validate sample-rate and sound parity independently.
-
-[executed on device: Johnnysstation (1200896c-45a0-4cb2-8dfa-479e25d803a4)]
