@@ -62,11 +62,13 @@ pub enum EngineCommand {
     },
     ControlChange {
         node: u32,
+        channel: u8,
         controller: u8,
         value: u8,
     },
     ProgramChange {
         node: u32,
+        channel: u8,
         program: u8,
     },
     /// Silence this clip's instrument without resetting other Session voices.
@@ -387,11 +389,16 @@ impl RenderEngine {
                 } => self.graph.live_midi(node, channel, message),
                 EngineCommand::ControlChange {
                     node,
+                    channel,
                     controller,
                     value,
-                } => self.graph.control_change(node, controller, value),
-                EngineCommand::ProgramChange { node, program } => {
-                    self.graph.program_change(node, program);
+                } => self.graph.control_change(node, channel, controller, value),
+                EngineCommand::ProgramChange {
+                    node,
+                    channel,
+                    program,
+                } => {
+                    self.graph.program_change(node, channel, program);
                 }
                 EngineCommand::AllNotesOff { node } => self.graph.all_notes_off(node),
                 EngineCommand::SetLoopStart {

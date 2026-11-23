@@ -272,17 +272,27 @@ impl Studio {
     }
 
     fn send_instrument_cc(&mut self, track_id: u64, controller: u8, value: u8) {
-        let node_ids = self
+        let (node_ids, channel) = self
             .project
             .tracks
             .iter()
             .find(|track| track.id == track_id)
-            .map(|track| self.midi_node_ids_for_track(track))
+            .map(|track| {
+                (
+                    self.midi_node_ids_for_track(track),
+                    track
+                        .instrument
+                        .as_ref()
+                        .map(|instrument| instrument.resolve().channel)
+                        .unwrap_or(0),
+                )
+            })
             .unwrap_or_default();
         if let Some(driver) = self.driver.as_mut() {
             for node in node_ids {
                 let _ = driver.controller().immediate(EngineCommand::ControlChange {
                     node,
+                    channel,
                     controller,
                     value,
                 });
