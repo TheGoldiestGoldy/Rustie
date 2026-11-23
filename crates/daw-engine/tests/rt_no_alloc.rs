@@ -392,6 +392,36 @@ fn soundfont_swaps_and_plays_a_new_note_without_realtime_heap_activity() {
 }
 
 #[test]
+fn sf16_multitimbral_render_and_channel_midi_are_allocation_free() {
+    use daw_engine::{Sf16Instrument, Sf16Settings, live_plugin::LiveMidiMessage};
+    use std::sync::Arc;
+
+    let bytes = include_bytes!("fixtures/qa-two-programs.sf2");
+    let bank = Arc::new(rustysynth::SoundFont::new(&mut bytes.as_slice()).unwrap());
+    let instrument = Sf16Instrument::new(&bank, 48_000, Sf16Settings::default()).unwrap();
+    let mut node = NodeSpec::midi(1);
+    node.source = Source::SoundFont {
+        instrument: Box::new(instrument),
+    };
+    let mut builder = GraphBuilder::new(48_000);
+    builder.add_node(node).add_node(NodeSpec::master(2));
+    builder.route(1, 2, 1.0);
+    let (mut controller, mut engine) = create_engine(builder.build().unwrap());
+    controller.immediate(EngineCommand::Play).unwrap();
+    controller
+        .immediate(EngineCommand::LiveMidi {
+            node: 1,
+            channel: 4,
+            message: LiveMidiMessage::NoteOn(69, 110),
+        })
+        .unwrap();
+
+    let mut output = [0.0_f32; 1024];
+    assert_no_alloc(|| engine.process_interleaved(&mut output, 2));
+    assert!(output.iter().any(|sample| sample.abs() > 0.01));
+}
+
+#[test]
 fn arrangement_seek_barriers_and_rebased_midi_are_allocation_free() {
     let mut builder = GraphBuilder::new(48_000);
     builder
