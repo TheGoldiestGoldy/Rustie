@@ -2,7 +2,8 @@
 //! Tests the engine callback body, not the implementation inside ALSA/JACK/CPAL.
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use daw_engine::{
-    EngineCommand, GraphBuilder, NodeSpec, ScheduledCommand, Source, StereoFrame, create_engine,
+    EngineCommand, GraphBuilder, Instrument, Lnf1Instrument, Lnf1ParamId, Lnf1ParamStore,
+    Lnf1Params, NodeSpec, ScheduledCommand, Source, StereoFrame, create_engine,
 };
 
 #[global_allocator]
@@ -178,6 +179,29 @@ fn built_in_eq_and_reverb_process_in_audio_callback_without_allocations() {
         }
     });
     assert!(output.iter().any(|sample| sample.abs() > 0.001));
+}
+
+#[test]
+fn lnf1_render_and_atomic_parameter_snapshot_are_allocation_free() {
+    let handle = Lnf1ParamStore::new(Lnf1Params::default());
+    let mut piano = Lnf1Instrument::with_param_store(48_000, handle.clone());
+    piano.note_on(60, 110);
+    let mut params = Lnf1Params::default();
+    params.set(Lnf1ParamId::ReverbMix, 42.0);
+    params.set(Lnf1ParamId::OutputLevel, -6.0);
+    handle.set_params(params);
+    let mut left = [0.0_f32; 128];
+    let mut right = [0.0_f32; 128];
+    assert_no_alloc(|| {
+        for _ in 0..100 {
+            piano.render(&mut left, &mut right);
+        }
+    });
+    assert!(
+        left.iter()
+            .chain(right.iter())
+            .any(|sample| sample.abs() > 0.0001)
+    );
 }
 
 #[test]

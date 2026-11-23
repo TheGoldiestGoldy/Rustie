@@ -28,6 +28,6 @@ pub use instruments::{
     build_synth_with_tone, load_sound_font,
 };
 pub use lnf1::{
-    LNF1_INSTRUMENT_BANK, Lnf1Instrument, Lnf1Page, Lnf1ParamId, Lnf1ParamSpec, Lnf1Params,
-    PARAM_SPECS,
+    LNF1_INSTRUMENT_BANK, Lnf1Instrument, Lnf1Page, Lnf1ParamHandle, Lnf1ParamId, Lnf1ParamSpec,
+    Lnf1ParamStore, Lnf1Params, PARAM_SPECS,
 };
